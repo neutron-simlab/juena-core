@@ -34,3 +34,10 @@ mcp = ["langchain[mcp]>=1.4,<2"]  # built-in; the standalone adapter is retired
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "fastmcp>=4.0.3",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
