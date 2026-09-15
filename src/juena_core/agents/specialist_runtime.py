@@ -1,25 +1,53 @@
-"""Stub for 01/CP2. Ported from ``juena/agents/specialist_runtime.py``, minus
-two sandbox imports (00-BOUNDARY.md, decision 5), plus a new
-``build_supervisor_middleware`` (00-BOUNDARY.md, decision 3).
-
-**Edit 1 of four for this checkpoint.** ``build_specialist_middleware`` gains
-``execution_middleware: Sequence = ()`` and ``interrupt_on: dict | None =
-None``, replacing the source's ``enable_execution_approval: bool`` flag.
-juena-chatbot passes its two; v2 passes nothing. **Keep the ``unattended``
-coupling intact** — ``ask_user_bound=not unattended`` and the absent
-execution backend must keep moving together, or a specialist can run
-commands with nobody to approve them.
-
-``SPECIALIST_TASK_DESCRIPTION`` is ``SUPERVISOR_TASK_DESCRIPTION`` from
-``juena/agents/juena_agent.py`` (which stays in the application), renamed and
-moved here as ``build_supervisor_middleware``'s default ``task_description``.
-"""
+"""Shared middleware and backend assembly for supervisors and specialists."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
+from importlib import resources
 from pathlib import Path
 from typing import Any
+
+import yaml
+from deepagents.backends import CompositeBackend
+from deepagents.backends.protocol import BackendProtocol
+from deepagents.middleware.filesystem import FilesystemMiddleware
+from deepagents.middleware.memory import MemoryMiddleware
+from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
+from deepagents.middleware.skills import SkillsMiddleware
+from deepagents.middleware.subagents import SubAgentMiddleware
+from deepagents.middleware.summarization import create_summarization_middleware
+from langchain.agents.middleware import (
+    HumanInTheLoopMiddleware,
+    ModelCallLimitMiddleware,
+    ModelFallbackMiddleware,
+    ModelRetryMiddleware,
+    ToolCallLimitMiddleware,
+    ToolRetryMiddleware,
+)
+
+from juena_core.agents.backends import (
+    FINDINGS_PREFIX,
+    MEMORY_SOURCES,
+    MEMORY_SYSTEM_PROMPT,
+    SUPERVISOR_FILESYSTEM_TOOL_DESCRIPTIONS,
+    FindingsStateBackend,
+    ReadOnlyFilesystemBackend,
+    ReadOnlyInputsStateBackend,
+)
+from juena_core.agents.delegation import with_delegation_boundary
+from juena_core.agents.loop_guard import RepeatedToolCallMiddleware
+from juena_core.agents.specialist_outcome import SpecialistOutcomeMiddleware
+from juena_core.config import settings
+from juena_core.llms_providers import (
+    build_chat_model,
+    get_available_providers,
+    get_default_model,
+)
+from juena_core.log import get_logger
+from juena_core.server.agent.runtime_model_middleware import RuntimeModelMiddleware
+
+logger = get_logger(__name__)
 
 __all__ = [
     "SUPERVISOR_MODEL_CALL_LIMIT",
@@ -47,64 +75,291 @@ SUPERVISOR_MODEL_CALL_LIMIT = 50
 SUPERVISOR_TOOL_CALL_LIMIT = 100
 SPECIALIST_MODEL_CALL_LIMIT = 60
 SPECIALIST_TOOL_CALL_LIMIT = 150
+# Background work gets a wider budget because nobody is watching a spinner.
+# The application's wall-clock timeout remains the real bound.
 BACKGROUND_MODEL_CALL_LIMIT = 150
 BACKGROUND_TOOL_CALL_LIMIT = 400
+# Questions allowed per graph invocation. A resume starts a new invocation.
 ASK_USER_CALL_LIMIT = 3
 MODEL_MAX_RETRIES = 3
+# Pinned because an upstream default change must not silently change policy.
 TOOL_MAX_RETRIES = 2
-UNATTENDED_NOTICE = ""
-SPECIALIST_TASK_DESCRIPTION = ""
+
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+UNATTENDED_NOTICE = (
+    "You are running unattended, as a background job the user started and then "
+    "carried on with their conversation. Nobody is watching this run: `ask_user` "
+    "is not available to you here, and neither is an execution backend. Decide "
+    "with the evidence you can gather, and put whatever you could not settle in "
+    "`limitations` -- an honest gap there is worth far more than a guess, "
+    "because the supervisor can act on it and cannot act on a guess.\n\n"
+    "Your report is the deliverable. The `/findings/` rule is unchanged here: "
+    "write a file only if this objective asked you to, and if it did, the file "
+    "itself comes back with the report for whoever is delegated to next."
+)
+
+SPECIALIST_TASK_DESCRIPTION = """Delegate a substantive domain task to a specialist.
+Give the specialist a self-contained objective with only the relevant user context and
+saved preferences. Prefer one specialist; use more only for an explicit comparison or
+clearly independent aspects that need different expertise. Resolve an ambiguous request
+with ask_user before delegating rather than guessing on the user's behalf.
+
+Every result arrives as a `<specialist_report>` block paired with a
+`<verified_by_server>` block. The second block is written by the server from actual
+execution evidence and the artifact store; it overrides anything the report claims.
+
+Available specialist types:
+{available_agents}
+"""
 
 
 class PromptResourceError(RuntimeError):
-    """Stub — implemented in 01/CP2."""
+    """Raised when a required packaged prompt cannot be loaded."""
 
 
 def load_markdown(package: str, filename: str) -> str:
-    raise NotImplementedError("juena_core.agents.specialist_runtime.load_markdown lands in 01/CP2")
+    """Load one required Markdown resource and fail loudly when packaging is broken."""
+
+    try:
+        text = resources.files(package).joinpath(filename).read_text(encoding="utf-8")
+    except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
+        raise PromptResourceError(
+            f"Unable to load prompt resource {package}:{filename}"
+        ) from exc
+    if not text.strip():
+        raise PromptResourceError(f"Prompt resource {package}:{filename} is empty")
+    return text.rstrip() + "\n"
+
+
+def _valid_skill_file(skill_file: Path) -> bool:
+    """Perform the minimum Agent Skills validation needed before enabling middleware."""
+
+    try:
+        text = skill_file.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if not text.startswith("---\n"):
+        return False
+    try:
+        _marker, frontmatter, body = text.split("---", 2)
+        metadata = yaml.safe_load(frontmatter)
+    except (ValueError, yaml.YAMLError):
+        return False
+    if not isinstance(metadata, dict):
+        return False
+    name = metadata.get("name")
+    description = metadata.get("description")
+    return bool(
+        isinstance(name, str)
+        and name == skill_file.parent.name
+        and len(name) <= 64
+        and _SKILL_NAME_RE.fullmatch(name)
+        and isinstance(description, str)
+        and description.strip()
+        and len(description) <= 1024
+        and body.strip()
+    )
 
 
 def has_authored_skills(skills_dir: Path | None) -> bool:
-    raise NotImplementedError("juena_core.agents.specialist_runtime.has_authored_skills lands in 01/CP2")
+    """Return whether a specialist owns at least one valid `SKILL.md`."""
+
+    if skills_dir is None or not skills_dir.is_dir():
+        return False
+    return any(
+        child.is_dir() and _valid_skill_file(child / "SKILL.md")
+        for child in skills_dir.iterdir()
+    )
 
 
-def build_specialist_backend(*args: Any, **kwargs: Any) -> Any:
-    raise NotImplementedError("juena_core.agents.specialist_runtime.build_specialist_backend lands in 01/CP2")
+def build_specialist_backend(
+    *,
+    repo_cache_root: Path | None = None,
+    skills_dir: Path | None = None,
+) -> CompositeBackend:
+    """Build isolated staged-input, repository, and optional skill routes."""
+
+    routes: dict[str, Any] = {FINDINGS_PREFIX: FindingsStateBackend()}
+    if repo_cache_root is not None:
+        routes["/repos/"] = ReadOnlyFilesystemBackend(
+            root_dir=repo_cache_root,
+            virtual_mode=True,
+            label="read-only repository",
+        )
+    if has_authored_skills(skills_dir):
+        routes["/skills/"] = ReadOnlyFilesystemBackend(
+            root_dir=skills_dir,
+            virtual_mode=True,
+            label="read-only skill",
+        )
+    return CompositeBackend(default=ReadOnlyInputsStateBackend(), routes=routes)
 
 
-def resilience_middleware(*args: Any, **kwargs: Any) -> Any:
-    raise NotImplementedError("juena_core.agents.specialist_runtime.resilience_middleware lands in 01/CP2")
+def resilience_middleware(
+    fallback_models: Sequence[Any],
+    *,
+    model_call_limit: int,
+    tool_call_limit: int,
+    ask_user_bound: bool = True,
+) -> list[Any]:
+    """Build retry, fallback, and per-invocation budget middleware in nesting order."""
+
+    middleware: list[Any] = []
+    if fallback_models:
+        middleware.append(ModelFallbackMiddleware(*fallback_models))
+    middleware.extend(
+        [
+            ModelRetryMiddleware(max_retries=MODEL_MAX_RETRIES, on_failure="error"),
+            ToolRetryMiddleware(max_retries=TOOL_MAX_RETRIES),
+            ModelCallLimitMiddleware(run_limit=model_call_limit, exit_behavior="end"),
+            ToolCallLimitMiddleware(run_limit=tool_call_limit, exit_behavior="continue"),
+        ]
+    )
+    if ask_user_bound:
+        middleware.append(
+            ToolCallLimitMiddleware(
+                tool_name="ask_user",
+                run_limit=ASK_USER_CALL_LIMIT,
+                exit_behavior="continue",
+            )
+        )
+    return middleware
 
 
 def build_fallback_models() -> list[Any]:
-    raise NotImplementedError("juena_core.agents.specialist_runtime.build_fallback_models lands in 01/CP2")
+    """Build deployment-level fallbacks independently of the request model."""
+
+    fallback_provider = (settings().FALLBACK_PROVIDER or "").strip().lower()
+    if not fallback_provider:
+        return []
+    if not get_available_providers().get(fallback_provider, False):
+        logger.warning(
+            "FALLBACK_PROVIDER '%s' is not configured; running without a model fallback",
+            fallback_provider,
+        )
+        return []
+    fallback_model = get_default_model(fallback_provider)
+    if not fallback_model:
+        return []
+    logger.info("Model fallback enabled: %s/%s", fallback_provider, fallback_model)
+    return [build_chat_model(provider=fallback_provider, model=fallback_model)]
 
 
 def build_specialist_middleware(
-    *args: Any,
+    *,
+    backend: BackendProtocol,
+    summarizer_model: Any,
+    fallback_models: Sequence[Any],
+    filesystem_tool_descriptions: Mapping[str, str],
+    specialist_name: str,
+    skills_dir: Path | None = None,
+    skills_label: str = "",
     execution_middleware: Sequence[Any] = (),
     interrupt_on: dict[str, Any] | None = None,
-    **kwargs: Any,
+    unattended: bool = False,
 ) -> list[Any]:
-    raise NotImplementedError("juena_core.agents.specialist_runtime.build_specialist_middleware lands in 01/CP2")
+    """Build the common specialist stack while keeping agent choices local.
+
+    Execution middleware and its approval policy are an all-or-nothing pair.
+    Unattended specialists receive neither that pair nor `ask_user`.
+    """
+
+    has_execution = bool(execution_middleware)
+    has_interrupt = interrupt_on is not None
+    if has_execution != has_interrupt:
+        raise ValueError(
+            "execution_middleware and interrupt_on must be supplied together"
+        )
+    if unattended and (has_execution or has_interrupt):
+        raise ValueError("unattended specialists cannot mount an execution backend")
+
+    middleware: list[Any] = [
+        SpecialistOutcomeMiddleware(specialist_name=specialist_name),
+        RepeatedToolCallMiddleware(),
+    ]
+    if has_authored_skills(skills_dir):
+        middleware.append(
+            SkillsMiddleware(
+                backend=backend,
+                sources=[("/skills/", skills_label)],
+            )
+        )
+    middleware.extend(
+        [
+            FilesystemMiddleware(
+                backend=backend,
+                custom_tool_descriptions=dict(filesystem_tool_descriptions),
+                max_execute_timeout=settings().EXECUTE_TIMEOUT_SECONDS,
+            ),
+            create_summarization_middleware(summarizer_model, backend),
+            PatchToolCallsMiddleware(),
+            *resilience_middleware(
+                fallback_models,
+                model_call_limit=(
+                    BACKGROUND_MODEL_CALL_LIMIT
+                    if unattended
+                    else SPECIALIST_MODEL_CALL_LIMIT
+                ),
+                tool_call_limit=(
+                    BACKGROUND_TOOL_CALL_LIMIT
+                    if unattended
+                    else SPECIALIST_TOOL_CALL_LIMIT
+                ),
+                ask_user_bound=not unattended,
+            ),
+        ]
+    )
+    if has_execution:
+        middleware.extend(execution_middleware)
+        middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))
+    return middleware
 
 
 def build_supervisor_middleware(
     *,
-    backend: Any,
+    backend: BackendProtocol,
     summarizer_model: Any,
-    fallback_models: Any,
-    subagents: Any,
+    fallback_models: Sequence[Any],
+    subagents: Sequence[dict[str, Any]],
     task_description: str = SPECIALIST_TASK_DESCRIPTION,
     extra: Sequence[Any] = (),
+    memory_system_prompt: str = MEMORY_SYSTEM_PROMPT,
     model_call_limit: int = SUPERVISOR_MODEL_CALL_LIMIT,
     tool_call_limit: int = SUPERVISOR_TOOL_CALL_LIMIT,
 ) -> list[Any]:
-    """New in core (00-BOUNDARY.md, decision 3). Returns the canonical
-    middleware stack with exactly one named insertion point: ``extra`` is
-    spliced after ``PatchToolCallsMiddleware`` and before
-    ``RuntimeModelMiddleware``. Not a hook system — a list, spliced at one
-    documented index, everything else fixed. 01/CP2's done-when condition is
-    a permanent test asserting the returned list's class names in order.
+    """Return the canonical supervisor middleware stack.
+
+    `extra` is the sole splice point. It sits after
+    `PatchToolCallsMiddleware` and before `RuntimeModelMiddleware`, preserving
+    the established nesting order while letting an application add genuinely
+    application-owned cross-cutting behavior.
     """
-    raise NotImplementedError("juena_core.agents.specialist_runtime.build_supervisor_middleware lands in 01/CP2")
+
+    return [
+        RepeatedToolCallMiddleware(),
+        FilesystemMiddleware(
+            backend=backend,
+            custom_tool_descriptions=SUPERVISOR_FILESYSTEM_TOOL_DESCRIPTIONS,
+        ),
+        MemoryMiddleware(
+            backend=backend,
+            sources=MEMORY_SOURCES,
+            system_prompt=memory_system_prompt,
+        ),
+        SubAgentMiddleware(
+            backend=backend,
+            subagents=with_delegation_boundary(list(subagents)),
+            system_prompt=None,
+            task_description=task_description,
+        ),
+        create_summarization_middleware(summarizer_model, backend),
+        PatchToolCallsMiddleware(),
+        *extra,
+        RuntimeModelMiddleware(),
+        *resilience_middleware(
+            fallback_models,
+            model_call_limit=model_call_limit,
+            tool_call_limit=tool_call_limit,
+        ),
+    ]

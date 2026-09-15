@@ -74,8 +74,12 @@ def test_ask_user_strips_question() -> None:
 
 
 def test_execution_evidence_derives_attempt_and_success() -> None:
-    completed = ExecutionEvidence(command="run", status="completed", exit_code=0)
-    skipped = ExecutionEvidence(command="run", status="skipped")
+    completed = ExecutionEvidence(
+        graph_run_id="graph-1", command="run", status="completed", exit_code=0
+    )
+    skipped = ExecutionEvidence(
+        graph_run_id="graph-1", command="run", status="skipped"
+    )
 
     assert completed.attempted is True
     assert completed.succeeded is True
