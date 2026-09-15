@@ -236,8 +236,8 @@ async def test_listing_separates_the_agents(db_session) -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_principal_can_own_a_conversation_after_startup(database) -> None:
-    """The failure this catches otherwise appears only in the browser."""
+async def test_local_principal_can_own_a_conversation_after_row_upsert(database) -> None:
+    """CP3 proves the primitive; CP4 wires it into application startup."""
 
     user_id = uuid4()
     dependency = local_principal(user_id=user_id, display_name="Local User")
@@ -255,7 +255,7 @@ async def test_local_principal_can_own_a_conversation_after_startup(database) ->
 
 
 @pytest.mark.asyncio
-async def test_the_startup_upsert_is_idempotent_and_catches_a_changed_id(database) -> None:
+async def test_principal_row_upsert_is_idempotent_and_catches_a_changed_id(database) -> None:
     principal = Principal(
         id=uuid4(), subject="local", issuer="local", email=None, display_name=None
     )
