@@ -1,9 +1,9 @@
 """juena_core — shared agent/server/UI infrastructure extracted from juena-chatbot.
 
-See ``00-BOUNDARY.md`` for the disposition table and the seventeen decisions
-this package's shape follows from. ``[ui]`` (``juena_core.ui``) and ``[mcp]``
-(``juena_core.mcp``) are optional extras and are deliberately not imported
-here — importing this package must never require Streamlit or FastMCP.
+See ``00-BOUNDARY.md`` for the disposition table and the boundary decisions
+this package's shape follows from. ``[ui]`` (``juena_core.ui``), ``[mcp]``
+(``juena_core.mcp``), and ``[sandbox]`` (``juena_core.sandbox``) are optional
+extras and are deliberately not imported here.
 """
 
 from __future__ import annotations
@@ -26,4 +26,5 @@ __all__ = [
     "agents",
     "clients",
     "server",
+    "sandbox",
 ]
