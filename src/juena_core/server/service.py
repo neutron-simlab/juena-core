@@ -14,6 +14,20 @@ module with a ``# noqa: F401`` and a comment, in its own ``service.py``.
 5): core registers the clarification kind it knows; the application
 registers its own kinds at startup.
 
+**Two things CP3 built for this factory to call** (``server/identity.py``),
+both no-ops for a real identity provider:
+
+- ``refuse_published_api(principal)`` — raises when a fixed principal, which
+  authenticates nobody, is paired with a published API. ``local_principal``
+  already calls it at construction, so this is the second of two gates rather
+  than the only one; call it anyway, because an application may build its
+  principal before it decides how to serve it.
+- ``ensure_principal_row(fixed_principal(principal))`` — when
+  ``fixed_principal`` returns a principal, its ``users`` row must be written
+  inside the database lifespan, after the session factory exists and before
+  the app serves. Nothing else creates it, and ``chats.user_id`` is a foreign
+  key.
+
 **Done when** (01/CP4): the route list this factory produces includes
 ``/chats``, ``/chats/{thread_id}``, ``/stream``, ``/stream_with_files``,
 ``/resume``, ``/{agent_id}/stream``, ``/{agent_id}/stream_with_files``,
