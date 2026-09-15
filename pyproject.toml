@@ -1,0 +1,36 @@
+[project]
+name = "juena-core"
+version = "0.1.0"
+description = "Shared agent/server/UI infrastructure extracted from juena-chatbot"
+readme = "README.md"
+authors = [
+    { name = "Ahmad Z. Ihsan", email = "a.ihsan@fz-juelich.de" }
+]
+requires-python = ">=3.11, <4.0"
+dependencies = [
+    # Bounds below are the versions validated together in CP0b.
+    # Re-validate and move them deliberately; do not widen them to "make it install".
+    "langchain[openai]>=1.4,<2",
+    "langgraph>=1.2,<2",
+    "deepagents>=0.7.13,<0.8",
+    "fastapi",
+    "uvicorn[standard]",
+    "sse-starlette",
+    "httpx",
+    "httpx-sse",
+    "pydantic",
+    "python-dotenv",
+    "langgraph-checkpoint-postgres",
+    "psycopg[binary,pool]",
+    "sqlalchemy[asyncio]",
+    "pyyaml",
+    "pillow",
+]
+
+[project.optional-dependencies]
+ui = ["streamlit>=1.53.0"]
+mcp = ["langchain[mcp]>=1.4,<2"]  # built-in; the standalone adapter is retired
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
