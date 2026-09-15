@@ -7,13 +7,17 @@ Anything that needs a live Postgres is in ``test_server_routes_postgres.py``.
 
 from __future__ import annotations
 
+import asyncio
+import io
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command, Interrupt
+from starlette.datastructures import Headers, UploadFile
 
 from juena_core import config as config_module
 from juena_core.artifacts import ARTIFACT_MESSAGE_KEY, ArtifactStore, set_artifact_store_for_tests
@@ -23,9 +27,10 @@ from juena_core.schema.llm_models import BlabladorModelName
 from juena_core.server import interrupts as interrupts_module
 from juena_core.server.agent import registry as registry_module
 from juena_core.server.agent.input_handler import AgentInputHandler
-from juena_core.server.agent.registry import get_default_agent, list_registered_agents
+from juena_core.server.agent.registry import get_agent, get_default_agent, list_registered_agents
 from juena_core.server.api.endpoints import DEFAULT_CLOSING_NOTE
 from juena_core.server.chat.input_constants import DISPLAY_TEXT_KEY
+from juena_core.server.chat.inputs import prepare_code_chat_turn_inputs
 from juena_core.server.chat.input_utils import build_inputs_manifest
 from juena_core.server.database.models import Base
 from juena_core.server.errors import AgentNotFoundError
@@ -223,6 +228,38 @@ def test_registering_a_default_rebinds_it(configured, monkeypatch) -> None:
 
     registry_module.register_agent_factory("simulator", factory, set_as_default=True)
     assert get_default_agent() == "simulator"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_requests_build_one_agent(configured, monkeypatch) -> None:
+    """The process cache must not leak one of two simultaneous builds."""
+
+    monkeypatch.setattr(registry_module, "_agent_registry", {})
+    monkeypatch.setattr(registry_module, "_agent_factories", {})
+    monkeypatch.setattr(registry_module, "_agent_creation_locks", {})
+    monkeypatch.setattr(registry_module, "DEFAULT_AGENT", None)
+
+    calls = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+    graph = object()
+
+    async def factory(provider: str, model: str):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return object(), graph
+
+    registry_module.register_agent_factory("simulator", factory, set_as_default=True)
+    first = asyncio.create_task(get_agent("simulator"))
+    await started.wait()
+    second = asyncio.create_task(get_agent("simulator"))
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await asyncio.gather(first, second) == [graph, graph]
+    assert calls == 1
 
 
 # --------------------------------------------------------------------------
@@ -506,3 +543,38 @@ def test_the_manifest_closing_note_is_the_applications() -> None:
     )
     assert manifest.endswith("Ask the simulator first.")
     assert DEFAULT_CLOSING_NOTE not in manifest
+
+
+@pytest.mark.asyncio
+async def test_workspace_view_matches_the_files_sent_to_the_graph() -> None:
+    """A process-backed workspace sees manifests and turn helpers too."""
+
+    class Agent:
+        async def aget_state(self, config):
+            return SimpleNamespace(values={"files": {}})
+
+    upload = UploadFile(
+        file=io.BytesIO(b"print('uploaded')\n"),
+        filename="uploaded.py",
+        headers=Headers({"content-type": "text/x-python"}),
+    )
+    prepared = await prepare_code_chat_turn_inputs(
+        Agent(),  # type: ignore[arg-type]
+        config={},  # type: ignore[arg-type]
+        message="Please inspect this.\n```python\nprint('pasted')\n```",
+        attachments=[upload],
+        closing_note="Inspect every staged file.",
+    )
+
+    assert prepared is not None
+    assert prepared.workspace_files == {
+        path: file_data
+        for path, file_data in prepared.files_update.items()
+        if file_data is not None
+    }
+    assert set(prepared.workspace_files) == {
+        "/inputs/current_code.py",
+        "/inputs/current_message.txt",
+        "/inputs/uploads/uploaded.py",
+        "/inputs/uploads_manifest.md",
+    }

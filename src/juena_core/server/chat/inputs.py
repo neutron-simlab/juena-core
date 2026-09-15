@@ -236,12 +236,6 @@ async def prepare_code_chat_turn_inputs(
         allowed_suffixes=allowed_suffixes,
     )
     files_update.update(uploaded_updates)
-    workspace_files = dict(existing_files)
-    for path, file_data in files_update.items():
-        if file_data is None:
-            workspace_files.pop(path, None)
-        else:
-            workspace_files[path] = file_data
     has_thread_uploads = bool(existing_upload_paths or uploaded)
 
     uploads_manifest = build_uploads_manifest(existing_files, existing_upload_paths, uploaded)
@@ -261,6 +255,18 @@ async def prepare_code_chat_turn_inputs(
             files_update["/inputs/current_error.txt"] = create_file_data(
                 pasted_context.error_text
             )
+
+    # Materialise exactly the state update the graph is about to receive. This
+    # has to happen after the manifest and turn-scoped helper files are added;
+    # computing it earlier leaves a process-backed workspace with only the raw
+    # upload even though the graph can also see current_message, extracted code
+    # or errors, and the upload manifest.
+    workspace_files = dict(existing_files)
+    for path, file_data in files_update.items():
+        if file_data is None:
+            workspace_files.pop(path, None)
+        else:
+            workspace_files[path] = file_data
 
     if has_turn_inputs or has_thread_uploads:
         return PreparedCodeChatInputs(

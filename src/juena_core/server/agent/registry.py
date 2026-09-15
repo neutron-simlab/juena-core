@@ -14,6 +14,7 @@ import, and the application's ``service.py`` is where it has to happen — see
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -54,6 +55,10 @@ _agent_registry: dict[str, tuple[AgentInstance, CompiledStateGraph]] = {}
 _agent_factories: dict[
     str, Callable[[str, str], Awaitable[tuple[AgentInstance, CompiledStateGraph]]]
 ] = {}
+# FastAPI may receive several requests before the first factory call finishes.
+# One lock per id makes the cache's "build once" contract true without making
+# unrelated agents wait for each other.
+_agent_creation_locks: dict[str, asyncio.Lock] = {}
 
 
 def register_agent_factory(
@@ -144,24 +149,34 @@ async def get_agent(
                 agent_id, details={"available_agents": list(_agent_factories)}
             )
 
-        try:
-            logger.info(
-                "Creating agent %s with default provider=%s model=%s", agent_id, provider, model
-            )
-            agent_instance, compiled_graph = await _agent_factories[agent_id](provider, model)
-            _agent_registry[agent_id] = (agent_instance, compiled_graph)
-            logger.info("Agent %s created and registered", agent_id)
-        except Exception as exc:
-            logger.error("Failed to create agent %s: %s", agent_id, exc)
-            raise AgentNotFoundError(
-                agent_id,
-                details={
-                    "error": str(exc),
-                    "agent_type": agent_id,
-                    "provider": provider,
-                    "model": model,
-                },
-            ) from exc
+        lock = _agent_creation_locks.setdefault(agent_id, asyncio.Lock())
+        async with lock:
+            # A request waiting for the lock uses the graph the first request
+            # just cached instead of constructing and overwriting another one.
+            if agent_id not in _agent_registry:
+                try:
+                    logger.info(
+                        "Creating agent %s with default provider=%s model=%s",
+                        agent_id,
+                        provider,
+                        model,
+                    )
+                    agent_instance, compiled_graph = await _agent_factories[agent_id](
+                        provider, model
+                    )
+                    _agent_registry[agent_id] = (agent_instance, compiled_graph)
+                    logger.info("Agent %s created and registered", agent_id)
+                except Exception as exc:
+                    logger.error("Failed to create agent %s: %s", agent_id, exc)
+                    raise AgentNotFoundError(
+                        agent_id,
+                        details={
+                            "error": str(exc),
+                            "agent_type": agent_id,
+                            "provider": provider,
+                            "model": model,
+                        },
+                    ) from exc
 
     return _agent_registry[agent_id][1]
 
@@ -204,6 +219,7 @@ async def shutdown_agents() -> None:
             logger.warning("Failed to close resources for agent %s", agent_id, exc_info=True)
 
     _agent_registry.clear()
+    _agent_creation_locks.clear()
 
 
 def list_registered_agents() -> list[str]:
