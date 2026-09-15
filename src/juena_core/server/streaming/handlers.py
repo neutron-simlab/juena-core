@@ -1,27 +1,81 @@
-"""Stub for 01/CP4. Ported from ``juena/server/streaming/handlers.py``
-(00-BOUNDARY.md, *Moves whole*)."""
+"""Handlers for the LangGraph stream modes this server subscribes to.
+
+Three modes are consumed:
+
+``updates``   complete messages as each node finishes
+``messages``  token chunks from LLM calls
+``custom``    bounded status dictionaries written by an application's execution
+              machinery. The stream processor forwards only the payload types
+              the application declared, and rejects every other custom write.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import BaseMessage
-from langgraph.types import Interrupt
+from langchain_core.messages import AIMessageChunk, BaseMessage
+from langgraph.types import Interrupt, Overwrite
 
 __all__ = ["is_subagent_namespace", "extract_update_messages", "extract_interrupts", "token_text"]
 
+# With subgraphs=True the namespace of a subagent contains a `tools:`-prefixed
+# segment, because subagents are invoked through the parent's tool node.
+# Verified against a real run: the supervisor streams under `()` and a subagent
+# under `('tools:<task-uuid>',)`. The suffix is a task id, not a readable name,
+# so there is nothing here worth showing the user.
+_SUBAGENT_NAMESPACE_PREFIX = "tools:"
+
 
 def is_subagent_namespace(node_path: Any) -> bool:
-    raise NotImplementedError("juena_core.server.streaming.handlers.is_subagent_namespace lands in 01/CP4")
+    """Whether a stream event originated inside a subagent rather than the supervisor."""
+
+    if not node_path:
+        return False
+    return any(str(segment).startswith(_SUBAGENT_NAMESPACE_PREFIX) for segment in node_path)
 
 
 def extract_update_messages(event: dict[str, Any]) -> list[BaseMessage]:
-    raise NotImplementedError("juena_core.server.streaming.handlers.extract_update_messages lands in 01/CP4")
+    """Pull the messages out of an ``updates`` event payload."""
+
+    new_messages: list[BaseMessage] = []
+
+    for node, updates in (event or {}).items():
+        if node == "__interrupt__":
+            continue
+
+        update_messages = (updates or {}).get("messages", [])
+        if isinstance(update_messages, Overwrite):
+            update_messages = update_messages.value
+        if update_messages is None:
+            continue
+        if isinstance(update_messages, BaseMessage):
+            new_messages.append(update_messages)
+            continue
+        if isinstance(update_messages, list):
+            new_messages.extend(m for m in update_messages if isinstance(m, BaseMessage))
+
+    return new_messages
 
 
 def extract_interrupts(event: dict[str, Any]) -> list[Interrupt]:
-    raise NotImplementedError("juena_core.server.streaming.handlers.extract_interrupts lands in 01/CP4")
+    """Return structured LangGraph interrupts from one updates payload."""
+
+    updates = (event or {}).get("__interrupt__", ())
+    return [item for item in updates if isinstance(item, Interrupt)]
 
 
 def token_text(event: tuple[BaseMessage, dict[str, Any]]) -> str | None:
-    raise NotImplementedError("juena_core.server.streaming.handlers.token_text lands in 01/CP4")
+    """Return the streamable text of a ``messages`` event, or None to skip it.
+
+    Only ``AIMessageChunk`` carries answer text. ``.text`` yields the text
+    blocks alone, so tool-call and reasoning blocks never reach the client.
+    """
+
+    msg, metadata = event
+
+    if "skip_stream" in (metadata or {}).get("tags", []):
+        return None
+    if not isinstance(msg, AIMessageChunk):
+        return None
+
+    return msg.text or None

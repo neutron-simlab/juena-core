@@ -11,20 +11,24 @@ graph whose state channels do not match it. Both mismatches raise
 telling a caller that a row exists but is not theirs is itself an answer.
 
 :func:`load_thread_messages` is the one function here that reads *content*
-rather than ownership, and it needs ``server/utils.langchain_to_chat_message``,
-which lands with the rest of the server in 01/CP4.
+rather than ownership. It goes to the checkpointer, not to a table: the
+``chats`` row carries who owns a conversation, never what was said in it.
 """
 
 from __future__ import annotations
 
 from uuid import UUID, uuid4
 
+from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from juena_core.config import settings
 from juena_core.log import get_logger
 from juena_core.schema.server import ChatMessage
+from juena_core.server.database.checkpointer import get_checkpointer
 from juena_core.server.database.models import Chat
+from juena_core.server.utils import langchain_to_chat_message
 
 logger = get_logger(__name__)
 
@@ -115,12 +119,44 @@ async def list_owned_chats(
 
 
 async def load_thread_messages(thread_id: str) -> list[ChatMessage]:
-    """Read a thread's message history from the LangGraph checkpointer."""
+    """Read a thread's message history from the LangGraph checkpointer.
 
-    raise NotImplementedError(
-        "juena_core.server.chat.repository.load_thread_messages lands in 01/CP4, "
-        "with server/utils.langchain_to_chat_message"
-    )
+    The checkpointer is the single source of truth for conversation content.
+    Callers must verify ownership of ``thread_id`` before calling this — this
+    function takes no user, and would happily read anyone's thread.
+    """
+
+    checkpoint = await get_checkpointer().aget({"configurable": {"thread_id": thread_id}})
+    if checkpoint is None:
+        return []
+
+    include_tool_payloads = settings().STREAM_TOOL_PAYLOADS
+    messages: list[ChatMessage] = []
+    for message in checkpoint.get("channel_values", {}).get("messages", []):
+        if not isinstance(message, BaseMessage) or isinstance(message, SystemMessage):
+            continue
+        # Tool results are activity, not transcript. The live stream reports
+        # them as compact status events rather than messages, so including them
+        # here would make a reloaded thread render differently from how the
+        # user watched it happen.
+        if isinstance(message, ToolMessage) and not include_tool_payloads:
+            continue
+        try:
+            chat_message = langchain_to_chat_message(message)
+        except ValueError:
+            logger.warning("Skipping unsupported checkpointed message in thread %s", thread_id)
+            continue
+        # Tool-call announcements have no content of their own; the live stream
+        # drops them too.
+        if (
+            chat_message.type == "ai"
+            and chat_message.tool_calls
+            and not (chat_message.content or "").strip()
+        ):
+            continue
+        chat_message.thread_id = thread_id
+        messages.append(chat_message)
+    return messages
 
 
 def chat_to_dict(chat: Chat) -> dict[str, str]:
