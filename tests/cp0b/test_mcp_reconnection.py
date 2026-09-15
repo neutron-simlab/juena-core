@@ -9,12 +9,12 @@ import pytest
 
 from langchain.mcp import MCPAdapter
 
-from conftest import _free_port, start_scratch_server, stop_scratch_server
+from server_process import free_port, start_scratch_server, stop_scratch_server
 
 
 @pytest.mark.asyncio
 async def test_tool_call_survives_server_restart():
-    port = _free_port()
+    port = free_port()
     url = f"http://127.0.0.1:{port}/mcp"
     proc = start_scratch_server(port)
     try:
