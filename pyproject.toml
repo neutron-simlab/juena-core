@@ -19,7 +19,7 @@ dependencies = [
     "httpx",
     "httpx-sse",
     "pydantic",
-    "python-dotenv",
+    "typing-extensions>=4.12",
     "langgraph-checkpoint-postgres",
     "psycopg[binary,pool]",
     "sqlalchemy[asyncio]",

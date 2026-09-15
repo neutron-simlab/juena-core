@@ -1,17 +1,8 @@
-"""Stub for 01/CP1. Ported from ``juena/core/log.py``.
-
-Unlike the source, this must never import ``config`` at module scope — that
-import-time coupling is exactly what makes importing any ``juena`` module
-today load and validate ``.env`` (00-BOUNDARY.md, decision 1; Finding 1).
-``_get_log_level`` instead reads ``config.settings().LOG_LEVEL`` **at call
-time**, falling back to ``"INFO"`` when ``configure()`` has not run — a
-logger must never be the thing that refuses to start.
-"""
+"""Consistent, import-safe logging configuration for :mod:`juena_core`."""
 
 from __future__ import annotations
 
 import logging
-from typing import Union
 
 __all__ = ["LOG_FORMAT", "LOG_DATE_FORMAT", "setup_logger", "get_logger"]
 
@@ -19,13 +10,53 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
-def _get_log_level(level: Union[int, str, None] = None) -> int:
-    raise NotImplementedError("juena_core.log._get_log_level lands in 01/CP1")
+def _get_log_level(level: int | str | None = None) -> int:
+    """Convert a level to its logging constant.
+
+    Configuration is read only when this function is called. Before an
+    application configures core, logging safely defaults to ``INFO``.
+    """
+
+    if level is None:
+        from juena_core.config import settings
+
+        try:
+            level = settings().LOG_LEVEL
+        except RuntimeError:
+            level = "INFO"
+
+    if isinstance(level, int):
+        return level
+
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    return level_map.get(level.upper(), logging.INFO)
 
 
-def setup_logger(logger: logging.Logger, level: Union[int, str, None] = None) -> None:
-    raise NotImplementedError("juena_core.log.setup_logger lands in 01/CP1")
+def setup_logger(logger: logging.Logger, level: int | str | None = None) -> None:
+    """Configure *logger* once with the shared format and requested level."""
+
+    if logger.handlers:
+        return
+
+    resolved_level = _get_log_level(level)
+    handler = logging.StreamHandler()
+    handler.setLevel(resolved_level)
+    handler.setFormatter(logging.Formatter(fmt=LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
+
+    logger.addHandler(handler)
+    logger.setLevel(resolved_level)
+    logger.propagate = False
 
 
-def get_logger(name: str, level: Union[int, str, None] = None) -> logging.Logger:
-    raise NotImplementedError("juena_core.log.get_logger lands in 01/CP1")
+def get_logger(name: str, level: int | str | None = None) -> logging.Logger:
+    """Return a consistently configured logger named *name*."""
+
+    logger = logging.getLogger(name)
+    setup_logger(logger, level)
+    return logger

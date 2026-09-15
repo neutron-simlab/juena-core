@@ -8,9 +8,15 @@ here — importing this package must never require Streamlit or FastMCP.
 
 from __future__ import annotations
 
+from juena_core.config import CoreSettings, configure, settings
+
 __version__ = "0.1.0"
 
 __all__ = [
+    "__version__",
+    "CoreSettings",
+    "configure",
+    "settings",
     "config",
     "log",
     "llms_providers",

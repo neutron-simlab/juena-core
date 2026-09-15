@@ -1246,10 +1246,10 @@ dependencies = [
     { name = "pillow" },
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "pydantic" },
-    { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "sse-starlette" },
+    { name = "typing-extensions" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1281,11 +1281,11 @@ requires-dist = [
     { name = "pillow" },
     { name = "psycopg", extras = ["binary", "pool"] },
     { name = "pydantic" },
-    { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "sqlalchemy", extras = ["asyncio"] },
     { name = "sse-starlette" },
     { name = "streamlit", marker = "extra == 'ui'", specifier = ">=1.53.0" },
+    { name = "typing-extensions", specifier = ">=4.12" },
     { name = "uvicorn", extras = ["standard"] },
 ]
 provides-extras = ["ui", "mcp"]
