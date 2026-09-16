@@ -78,6 +78,9 @@ class AgentInputHandler:
                 model=model,
                 thread_id=thread_id,
                 user_id=user_id,
+                # The same id as `config`'s, carried where a subgraph can see
+                # it. See RuntimeModelContext for why both are needed.
+                run_id=str(run_id),
             ),
             run_id=run_id,
             thread_id=thread_id,

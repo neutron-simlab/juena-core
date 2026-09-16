@@ -34,8 +34,21 @@ def _identity(runtime: Any) -> tuple[str, str, str | None] | None:
 
 
 def _graph_run_id(runtime: Any) -> str:
-    """Return the invocation ID used to scope checkpointed evidence."""
+    """Return the invocation ID used to scope checkpointed evidence.
 
+    The runtime *context* is asked first, and it is the only source that works
+    where this middleware actually runs. `execute` is bound inside a specialist
+    subagent, and LangGraph fills `execution_info.run_id` from the config of
+    the graph that is running -- a subgraph does not inherit the parent's, so
+    there it is `None`. The context is passed down unchanged, so it is the one
+    identity a specialist and the supervisor reading its evidence can agree on.
+    The other two are kept for a caller that invokes an agent directly, without
+    going through the server's run context.
+    """
+
+    value = _context_value(getattr(runtime, "context", None), "run_id")
+    if value:
+        return value
     execution_info = getattr(runtime, "execution_info", None)
     value = getattr(execution_info, "run_id", None)
     if value:

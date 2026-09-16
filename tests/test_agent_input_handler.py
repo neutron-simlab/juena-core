@@ -32,7 +32,13 @@ def test_build_run_context_puts_identity_in_config_and_context(configured) -> No
         model="gpt-test",
         thread_id="thread-1",
         user_id="user-1",
+        run_id=str(run.run_id),
     )
+    # The same invocation id in both places, and that is the point of putting
+    # it in the context at all: a subgraph does not inherit the config's
+    # `run_id`, so a specialist writing execution evidence and the supervisor
+    # reading it back would otherwise have no id in common.
+    assert run.context.run_id == str(run.config["run_id"])
 
 
 def test_build_input_carries_only_message_channels() -> None:

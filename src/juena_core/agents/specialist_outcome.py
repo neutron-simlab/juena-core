@@ -83,6 +83,17 @@ def _identity(runtime: Any) -> tuple[str, str] | None:
 
 
 def _graph_run_id(runtime: Any) -> str | None:
+    """The invocation this evidence belongs to, from the context first.
+
+    Same order, and the same reason, as
+    :func:`juena_core.sandbox.middleware._graph_run_id`: evidence is written
+    inside a subagent and read outside it, and only the runtime context holds
+    one value on both sides of that boundary.
+    """
+
+    value = _context_value(getattr(runtime, "context", None), "run_id")
+    if value:
+        return value
     execution_info = getattr(runtime, "execution_info", None)
     value = getattr(execution_info, "run_id", None)
     if value:

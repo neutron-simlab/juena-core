@@ -27,12 +27,23 @@ __all__ = ["RuntimeModelContext", "RuntimeModelMiddleware"]
 
 @dataclass(frozen=True, slots=True)
 class RuntimeModelContext:
-    """Per-request runtime context used to select the active chat model."""
+    """Per-request runtime context: which model to use, and whose run this is.
+
+    ``run_id`` identifies one invocation of the graph, and it travels here
+    rather than in the ``RunnableConfig`` because a subgraph does not inherit
+    the parent's config ``run_id``. LangGraph populates
+    ``Runtime.execution_info.run_id`` from the config of the graph actually
+    running, so inside a specialist subagent it is ``None`` -- while the
+    runtime *context* is passed down unchanged. Execution evidence is written
+    inside a specialist and read outside it, so the id both halves agree on has
+    to be the one that crosses that boundary.
+    """
 
     provider: str
     model: str
     thread_id: str | None = None
     user_id: str | None = None
+    run_id: str | None = None
 
 
 def _provider_model_from_context(context: Any) -> tuple[str | None, str | None]:

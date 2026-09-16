@@ -284,3 +284,94 @@ def test_tool_still_runs_when_the_record_cannot_be_saved(store) -> None:
     result = middleware.wrap_tool_call(_request("python plot.py"), _handler())
 
     assert _message(result).text == "plot written\n"
+
+
+def test_execute_still_runs_where_the_tool_is_actually_bound(store) -> None:
+    """A specialist is a subgraph, and a subgraph has no config ``run_id``.
+
+    Every stand-in above hands the middleware a runtime whose ``config``
+    carries ``run_id``. A real one does not: ``execute`` is bound inside a
+    specialist subagent, LangGraph fills ``execution_info.run_id`` from the
+    config of the graph that is running, and a subgraph does not inherit its
+    parent's. So the condition this asserts -- a context with the invocation
+    id, a config without it -- is the only condition ``execute`` ever runs
+    under in the running application, and the generous stand-in is why a
+    version that raised there passed the whole suite.
+
+    Built with the real producers: a real ``create_agent`` graph, the real
+    middleware, and the real ``RuntimeModelContext`` the server builds.
+    """
+
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import tool
+
+    from juena_core.server.agent.runtime_model_middleware import RuntimeModelContext
+
+    ran: list[str] = []
+
+    @tool
+    def execute(command: str) -> str:
+        """Run one command in the sandbox."""
+        ran.append(command)
+        record_sandbox_execution(command=command, status="completed", exit_code=0)
+        return "plot written\n"
+
+    class _ToolModel(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ANN003
+            return self
+
+    agent = create_agent(
+        model=_ToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "execute", "args": {"command": "python plot.py"}, "id": "c1"}
+                    ],
+                ),
+                AIMessage(content="done"),
+            ]
+        ),
+        tools=[execute],
+        middleware=[SandboxExecutionMiddleware()],
+    )
+
+    agent.invoke(
+        {"messages": [("user", "plot it")]},
+        # No `run_id` in the config, exactly as a subgraph receives it.
+        config={"configurable": {"thread_id": "thread-a"}},
+        context=RuntimeModelContext(
+            provider="blablador",
+            model="fake",
+            thread_id="thread-a",
+            user_id="user-a",
+            run_id="run-42",
+        ),
+    )
+
+    assert ran == ["python plot.py"], "the approved command never reached the sandbox"
+
+
+def test_evidence_is_scoped_by_the_invocation_id_the_context_carries(store) -> None:
+    """The id written into evidence is the one a supervisor can match on.
+
+    `execution_events` is private state, so the graph test above cannot read
+    it back; this asserts the same runtime shape one level down, where the
+    value is visible.
+    """
+
+    middleware = SandboxExecutionMiddleware()
+    request = _request("python plot.py")
+    # A subgraph's runtime: the invocation id is in the context and nowhere else.
+    request.runtime = SimpleNamespace(
+        context=SimpleNamespace(user_id="user-a", thread_id="thread-a", run_id="run-42"),
+        execution_info=SimpleNamespace(run_id=None),
+        config={"configurable": {"thread_id": "thread-a"}},
+    )
+
+    result = middleware.wrap_tool_call(request, _handler())
+
+    assert [event["graph_run_id"] for event in _events(result)] == ["run-42"]
+    assert [event["exit_code"] for event in _events(result)] == [0]
