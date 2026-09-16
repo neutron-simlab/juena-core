@@ -1,8 +1,13 @@
-"""Contracts for the reusable Streamlit shell extracted in CP5."""
+"""Contracts for the reusable Streamlit shell extracted in CP5.
+
+Two of these were replaced in plan 02/step 3 by the finer-grained suite that
+moved here from juena-chatbot as ``test_ui_components.py``:
+``test_sanitize_assistant_content_removes_unrenderable_local_images`` and
+``test_artifact_history_fetch_uses_the_session_client``. That file names both.
+"""
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -10,7 +15,7 @@ import pytest
 
 from juena_core.clients.base import AgentClientError, BaseAgentClient
 from juena_core.schema.server import ChatMessage
-from juena_core.ui import client_setup, components, streaming
+from juena_core.ui import client_setup, streaming
 from juena_core.ui.chat_storage import Chat, ChatStorage, get_chat_storage
 
 
@@ -103,10 +108,28 @@ def test_chat_storage_preserves_and_filters_agent_identity() -> None:
     client.list_chats.assert_called_once_with(50, agent_id="simulator")
 
 
-def test_chat_storage_is_never_shared_between_sessions() -> None:
-    alice = Mock(spec=BaseAgentClient)
-    bob = Mock(spec=BaseAgentClient)
-    assert get_chat_storage(alice) is not get_chat_storage(bob)
+def test_chat_storage_never_shares_clients_between_browser_sessions() -> None:
+    """Streamlit module globals are shared; a session token must not be.
+
+    Moved here from juena-chatbot in plan 02/step 3, and it replaces the
+    ``Mock(spec=BaseAgentClient)`` version written in plan 01: real clients
+    carry real session tokens, so this also shows each adapter holding *its
+    own* caller's token rather than only holding a distinct object.
+    """
+
+    alice = BaseAgentClient(session_token="alice-session")
+    bob = BaseAgentClient(session_token="bob-session")
+
+    try:
+        alice_storage = get_chat_storage(alice)
+        bob_storage = get_chat_storage(bob)
+
+        assert alice_storage is not bob_storage
+        assert alice_storage.client.session_token == "alice-session"
+        assert bob_storage.client.session_token == "bob-session"
+    finally:
+        alice.close()
+        bob.close()
 
 
 def test_custom_status_events_are_dispatched_without_core_naming_them() -> None:
@@ -265,48 +288,3 @@ def test_failed_clarification_resume_reopens_its_answer_card(
 
     assert state.pending_approvals == {"thread-1": interrupt}
     assert answer_key not in state
-
-
-def test_sanitize_assistant_content_removes_unrenderable_local_images() -> None:
-    content = (
-        "Plot:\n\n![fit](sandbox:/workspace/fit.png)\n\n"
-        "![real](https://example.invalid/fit.png)"
-    )
-    assert components.sanitize_assistant_content(content) == (
-        "Plot:\n\n![real](https://example.invalid/fit.png)"
-    )
-
-
-def test_artifact_history_fetch_uses_the_session_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = Mock()
-    client.get_artifact.return_value = b"result\n"
-    download = Mock()
-    state = _SessionState(client=client)
-    monkeypatch.setattr(
-        components,
-        "st",
-        SimpleNamespace(
-            session_state=state,
-            caption=Mock(),
-            download_button=download,
-            container=lambda **_kwargs: nullcontext(),
-        ),
-    )
-
-    components.render_artifacts(
-        {
-            "artifacts": [
-                {
-                    "artifact_id": "artifact-1",
-                    "filename": "result.txt",
-                    "kind": "file",
-                    "mime_type": "text/plain",
-                }
-            ]
-        }
-    )
-
-    client.get_artifact.assert_called_once_with("artifact-1")
-    assert download.call_args.kwargs["data"] == b"result\n"

@@ -47,3 +47,14 @@ dev = [
     "pytest-asyncio>=1.4.0,<2",
     "requests>=2.32,<3",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The same guard juena-chatbot has carried since before the extraction. A
+# LangChain deprecation warning is how the framework announces that something
+# here will stop working at the next major version; as a warning it scrolls
+# past in a green run, and both applications then inherit the breakage from
+# core at once. Raised here so it fails in the package that owns the call.
+filterwarnings = [
+    "error::langchain_core._api.deprecation.LangChainDeprecationWarning",
+]

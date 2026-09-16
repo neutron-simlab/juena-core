@@ -274,6 +274,8 @@ def test_stream_uses_multipart_and_leaves_the_read_timeout_open(
     assert isinstance(timeout, httpx.Timeout)
     assert timeout.connect == 7.0
     assert timeout.read is None
+    assert timeout.write == 7.0
+    assert timeout.pool == 7.0
 
 
 def test_resume_stream_keeps_interrupt_kind_application_defined(
@@ -295,6 +297,8 @@ def test_resume_stream_keeps_interrupt_kind_application_defined(
             kind="execute_approval",
             decision="edit",
             edited_command="run --safe",
+            provider="openai",
+            model="gpt-4o-mini",
         )
     )
 
@@ -306,6 +310,8 @@ def test_resume_stream_keeps_interrupt_kind_application_defined(
         "kind": "execute_approval",
         "decision": "edit",
         "edited_command": "run --safe",
+        "provider": "openai",
+        "model": "gpt-4o-mini",
     }
 
 
@@ -325,3 +331,131 @@ def test_sse_parser_preserves_unknown_application_events(
 def test_sse_parser_rejects_non_object_frames(client: BaseAgentClient) -> None:
     with pytest.raises(AgentClientError, match="not an object"):
         client._parse_sse_data('["token"]')
+
+
+# ----------------------------------------------------------------------
+# Moved here from juena-chatbot's ``test_agent_client.py`` in plan 02/step 3.
+# Each of these drives a route or a parser that ``BaseAgentClient`` owns; the
+# two that stayed behind are the ones with a JüNA route behind them.
+# ----------------------------------------------------------------------
+
+
+def test_delete_thread_uses_thread_cleanup_endpoint(
+    client: BaseAgentClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting a conversation addresses the thread, not the agent.
+
+    ``/threads/{id}`` is core's route and it is not scoped by agent id: a
+    thread belongs to a user, and the same cleanup applies whichever agent
+    produced it.
+    """
+    captured: dict[str, Any] = {}
+
+    def delete(url: str, **kwargs: Any) -> _Response:
+        captured.update(url=url, **kwargs)
+        return _Response({"status": "success", "thread_id": "thread-1"})
+
+    monkeypatch.setattr(client._client, "delete", delete)
+
+    payload = client.delete_thread("thread-1")
+
+    assert payload == {"status": "success", "thread_id": "thread-1"}
+    assert captured == {
+        "url": "http://api.invalid/threads/thread-1",
+        "headers": {"Cookie": "juena_session=opaque-session"},
+        "timeout": 7.0,
+    }
+
+
+def test_session_cookie_replaces_shared_auth_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A browser session is the only credential the client sends.
+
+    An earlier generation of this client put a process-wide ``AUTH_SECRET``
+    bearer token on every request, which authenticated the *deployment* rather
+    than the person using it. The environment variable is set here so the
+    assertion fails if anything ever reads it again.
+    """
+    monkeypatch.setenv("AUTH_SECRET", "must-not-be-used")
+    client = BaseAgentClient(
+        base_url="http://api.invalid",
+        agent="advanced_mode",
+        session_token="opaque-session",
+    )
+    try:
+        assert client._headers == {"Cookie": "juena_session=opaque-session"}
+    finally:
+        client.close()
+
+
+def test_close_closes_reusable_http_client() -> None:
+    """The connection pool is shared for the client's life and closed once."""
+    client = BaseAgentClient(base_url="http://api.invalid", agent="advanced_mode")
+
+    client.close()
+
+    assert client._client.is_closed
+
+
+def test_sse_parser_preserves_approval_choices_and_artifact_bytes(
+    client: BaseAgentClient,
+) -> None:
+    """Two frames whose *contents* the UI acts on, not just their type.
+
+    ``test_sse_parser_preserves_unknown_application_events`` shows the parser
+    keeps a frame it has never heard of. These two are frames core does define,
+    and they are the ones where dropping a key is silently destructive: without
+    ``allowed_decisions`` an approval card renders no buttons, and without
+    ``content_base64`` an artifact arrives empty.
+    """
+    approval = client._parse_sse_data(
+        '{"type":"approval_required","interrupt_id":"i-1","command":"python x.py",'
+        '"allowed_decisions":["approve","reject"],"limits":{"network":"none"}}'
+    )
+    artifact = client._parse_sse_data(
+        '{"type":"artifact","artifact_id":"a-1","filename":"plot.png",'
+        '"mime_type":"image/png","kind":"image","content_base64":"abc"}'
+    )
+
+    assert approval["allowed_decisions"] == ["approve", "reject"]
+    assert approval["command"] == "python x.py"
+    assert approval["limits"] == {"network": "none"}
+    assert artifact["artifact_id"] == "a-1"
+    assert artifact["content_base64"] == "abc"
+
+
+def test_resume_stream_posts_an_answer_without_a_decision(
+    client: BaseAgentClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Core's own interrupt kind carries an answer and nothing else.
+
+    ``clarification`` is the one kind core names itself, because ``ask_user``
+    is core's. The payload must not acquire the approval arm's keys: a
+    ``decision`` on a clarification is a resume the server cannot validate.
+    """
+    captured: dict[str, Any] = {}
+
+    def stream(method: str, url: str, **kwargs: Any) -> _StreamContext:
+        captured.update(method=method, url=url, kwargs=kwargs)
+        return _StreamContext(_StreamResponse(['{"type":"token","content":"done"}']))
+
+    monkeypatch.setattr(client._client, "stream", stream)
+
+    list(
+        client.resume_stream(
+            thread_id="thread-1",
+            interrupt_id="interrupt-2",
+            kind="clarification",
+            answer="Empty cell",
+        )
+    )
+
+    assert captured["kwargs"]["json"] == {
+        "thread_id": "thread-1",
+        "interrupt_id": "interrupt-2",
+        "kind": "clarification",
+        "answer": "Empty cell",
+    }

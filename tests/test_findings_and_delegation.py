@@ -37,6 +37,20 @@ class _Recorder(Runnable):
 
 
 def test_only_inputs_and_findings_cross_into_a_specialist() -> None:
+    """A specialist is told it cannot see the conversation. It could.
+
+    ``SubAgentMiddleware`` copies the parent's whole state in, and a supervisor
+    keeps evicted conversation turns under ``/conversation_history/`` in the
+    same ``files`` channel that carries findings. So the part of the
+    conversation the supervisor had already thrown away was being handed to the
+    one agent whose prompt promises it has no access to any of it.
+
+    The state handed in is built from scratch rather than filtered, which is
+    why ``future_private_field`` is absent without anyone having named it: a
+    denylist would have to be revisited on every upstream release that adds a
+    state field.
+    """
+
     inner = _Recorder()
     delegate = SpecialistDelegate(inner, name="specialist")
 
@@ -62,6 +76,13 @@ def test_only_inputs_and_findings_cross_into_a_specialist() -> None:
 
 
 def test_only_the_report_and_changed_findings_cross_back() -> None:
+    """The return trip is an allowlist too.
+
+    Deep Agents copies the subagent's whole state back except ``messages``, so
+    a scratch file, an execution event, or a finding the run merely inherited
+    would all otherwise reach the conversation.
+    """
+
     inner = _Recorder(
         produces={
             "/findings/new.md": _file("new evidence"),
@@ -81,6 +102,8 @@ def test_only_the_report_and_changed_findings_cross_back() -> None:
 
 
 def test_async_delegation_has_the_same_boundary() -> None:
+    """Both entry points are wrapped, not just the one the tests above take."""
+
     import asyncio
 
     inner = _Recorder({"/findings/new.md": _file("new")})

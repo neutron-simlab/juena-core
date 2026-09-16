@@ -1,7 +1,11 @@
 """Artifact validation, ownership, persistence, and download metadata."""
 
 import io
+from uuid import UUID, uuid4
+
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from PIL import Image
 
 from juena_core.artifacts import (
@@ -13,6 +17,8 @@ from juena_core.artifacts import (
     MAX_IMAGE_ARTIFACTS_PER_TURN,
     MAX_RECORD_ARTIFACTS_PER_TURN,
 )
+from juena_core.server.api.endpoints import build_api_router
+from juena_core.server.identity import Principal
 
 
 def _png() -> bytes:
@@ -272,3 +278,52 @@ def test_thread_deletion_removes_files(tmp_path) -> None:
     store.delete_thread("user-a", "thread-a")
 
     assert store.get("user-a", ref.artifact_id) is None
+
+
+def _principal(user_id: UUID, name: str) -> Principal:
+    return Principal(
+        id=user_id,
+        subject=name,
+        issuer="test-issuer",
+        email=None,
+        display_name=name,
+    )
+
+
+def test_artifact_endpoint_enforces_authenticated_owner(tmp_path) -> None:
+    """The download route is the only way a stored file leaves the server.
+
+    ``get_artifact`` is a closure inside ``build_api_router`` now, so this
+    drives the real route rather than the function: the store is asked for
+    ``str(user.id)``, and a caller who is not that user must not be able to
+    tell an artifact they do not own from one that does not exist.
+    """
+
+    owner_id = uuid4()
+    other_id = uuid4()
+    caller = {"principal": _principal(owner_id, "owner")}
+    store = _store(tmp_path)
+    set_artifact_store_for_tests(store)
+    ref = store.register_artifact(
+        user_id=str(owner_id),
+        thread_id="thread-a",
+        run_id=None,
+        filename="analysis.py",
+        content=b"print('ok')\n",
+    )
+
+    app = FastAPI()
+    app.include_router(build_api_router(lambda: caller["principal"]))
+
+    try:
+        with TestClient(app) as client:
+            owned = client.get(f"/artifacts/{ref.artifact_id}")
+            caller["principal"] = _principal(other_id, "other")
+            refused = client.get(f"/artifacts/{ref.artifact_id}")
+    finally:
+        set_artifact_store_for_tests(None)
+
+    assert owned.status_code == 200
+    assert owned.content == b"print('ok')\n"
+    assert owned.headers["content-disposition"].startswith("attachment;")
+    assert refused.status_code == 404

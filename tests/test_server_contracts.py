@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -21,9 +20,7 @@ from starlette.datastructures import Headers, UploadFile
 
 from juena_core import config as config_module
 from juena_core.artifacts import ARTIFACT_MESSAGE_KEY, ArtifactStore, set_artifact_store_for_tests
-from juena_core.config import CoreSettings
 from juena_core.schema.interrupts import CLARIFICATION_KIND, ClarificationResumeInput
-from juena_core.schema.llm_models import BlabladorModelName
 from juena_core.server import interrupts as interrupts_module
 from juena_core.server.agent import registry as registry_module
 from juena_core.server.agent.input_handler import AgentInputHandler
@@ -65,57 +62,6 @@ EXPECTED_ROUTES = {
     "/artifacts/{artifact_id}",
     "/health",
 }
-
-
-def make_settings(**overrides: object) -> CoreSettings:
-    values: dict[str, object] = {
-        "OPENAI_API_KEY": None,
-        "BLABLADOR_API_KEY": None,
-        "BLABLADOR_BASE_URL": None,
-        "MAX_TOKENS": 10_000,
-        "TIMEOUT_SECONDS": 60,
-        "MAX_RETRIES": 3,
-        "DEFAULT_PROVIDER": "blablador",
-        "DEFAULT_MODEL": BlabladorModelName.GPT_OSS.value,
-        "OPENAI_AVAILABLE_MODELS": None,
-        "BLABLADOR_AVAILABLE_MODELS": None,
-        "OPENAI_DEFAULT_MODEL": "gpt-4o-mini",
-        "BLABLADOR_DEFAULT_MODEL": BlabladorModelName.GPT_OSS.value,
-        "STREAM_TOOL_PAYLOADS": False,
-        "DATABASE_URL": None,
-        "DATABASE_POOL_MAX_SIZE": 5,
-        "SESSION_TTL_HOURS": 8,
-        "SESSION_COOKIE_SECURE": False,
-        "FALLBACK_PROVIDER": None,
-        "EXECUTE_TIMEOUT_SECONDS": 600,
-        "ARTIFACT_ROOT": Path("/tmp/juena-core-contract-artifacts"),
-        "AUDIT_FILE": Path("/tmp/juena-core-contract-artifacts/audit.jsonl"),
-        "LOG_LEVEL": "INFO",
-        "LOG_DIR": Path("/tmp/juena-core-contract-logs"),
-        "BIND_HOST": "127.0.0.1",
-        "API_PUBLISHED": False,
-    }
-    values.update(overrides)
-    return CoreSettings(**values)  # type: ignore[arg-type]
-
-
-@pytest.fixture
-def configured(monkeypatch):
-    """Install core settings process-wide for one test.
-
-    Patching the module global rather than each importer's reference: every
-    module holds the same ``settings`` function, and that function reads this.
-    """
-
-    config = make_settings()
-    monkeypatch.setattr(config_module, "_settings", config)
-    return config
-
-
-@pytest.fixture
-def local(configured):
-    return local_principal(user_id=uuid4())
-
 
 def route_paths(app: Any) -> set[str]:
     """Every path the application serves.
@@ -317,32 +263,42 @@ async def test_concurrent_first_requests_build_one_agent(configured, monkeypatch
 # --------------------------------------------------------------------------
 
 
-def test_create_app_refuses_a_fixed_principal_on_a_published_api(monkeypatch) -> None:
+def test_create_app_refuses_a_fixed_principal_on_a_published_api(
+    monkeypatch, settings_factory
+) -> None:
     """The second gate: an application may build its principal before it
     decides how to serve it, and this is the moment the port is about to open."""
 
-    monkeypatch.setattr(config_module, "_settings", make_settings())
+    monkeypatch.setattr(config_module, "_settings", settings_factory())
     principal = local_principal(user_id=uuid4())
 
-    monkeypatch.setattr(config_module, "_settings", make_settings(API_PUBLISHED=True))
+    monkeypatch.setattr(
+        config_module, "_settings", settings_factory(API_PUBLISHED=True)
+    )
     with pytest.raises(RuntimeError, match="API_PUBLISHED"):
         create_app(principal=principal)
 
 
-def test_create_app_refuses_a_fixed_principal_on_a_non_loopback_bind(monkeypatch) -> None:
-    monkeypatch.setattr(config_module, "_settings", make_settings())
+def test_create_app_refuses_a_fixed_principal_on_a_non_loopback_bind(
+    monkeypatch, settings_factory
+) -> None:
+    monkeypatch.setattr(config_module, "_settings", settings_factory())
     principal = local_principal(user_id=uuid4())
 
-    monkeypatch.setattr(config_module, "_settings", make_settings(BIND_HOST="0.0.0.0"))
+    monkeypatch.setattr(
+        config_module, "_settings", settings_factory(BIND_HOST="0.0.0.0")
+    )
     with pytest.raises(RuntimeError, match="BIND_HOST"):
         create_app(principal=principal)
 
 
-def test_a_real_identity_provider_stays_publishable(monkeypatch) -> None:
+def test_a_real_identity_provider_stays_publishable(monkeypatch, settings_factory) -> None:
     """Publishing the API is exactly what a real identity provider is for."""
 
     monkeypatch.setattr(
-        config_module, "_settings", make_settings(API_PUBLISHED=True, BIND_HOST="0.0.0.0")
+        config_module,
+        "_settings",
+        settings_factory(API_PUBLISHED=True, BIND_HOST="0.0.0.0"),
     )
     assert route_paths(create_app(principal=session_principal)) == EXPECTED_ROUTES
 
@@ -628,3 +584,90 @@ async def test_workspace_view_matches_the_files_sent_to_the_graph() -> None:
         "/inputs/uploads/uploaded.py",
         "/inputs/uploads_manifest.md",
     }
+
+
+# --------------------------------------------------------------------------
+# Thread deletion
+#
+# Moved here from juena-chatbot's ``test_api_endpoints_files.py`` in plan
+# 02/step 3. That module's other test, the chat-recency assertion, is already
+# covered against a real database by
+# ``test_server_routes_postgres.py::test_authorizing_a_message_touches_chat_recency``.
+# --------------------------------------------------------------------------
+
+
+def test_delete_thread_endpoint_removes_persisted_state(configured, monkeypatch, tmp_path) -> None:
+    """Deleting a conversation empties every store that kept part of it.
+
+    A thread leaves traces in three places, and the route is the only thing
+    that knows about all of them: the checkpointer holds the graph state, the
+    artifact store holds generated files, and an application may have staged
+    input files in a workspace. Forgetting one leaves a user's data behind
+    after they asked for it to be gone, which no per-store test would notice.
+    """
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from juena_core.server.api import endpoints as api_endpoints
+    from juena_core.server.api.endpoints import ThreadWorkspace, build_api_router
+    from juena_core.server.database.connection import get_db_session
+
+    user_id = uuid4()
+    deleted: dict[str, Any] = {}
+
+    class _Checkpointer:
+        async def adelete_thread(self, thread_id: str) -> None:
+            deleted["checkpointer"] = thread_id
+
+    class _Session:
+        async def delete(self, value: Any) -> None:
+            deleted["chat"] = value.thread_id
+
+        async def commit(self) -> None:
+            deleted["committed"] = True
+
+    async def fake_get_owned_chat(session, owner_id, thread_id, agent_id=None):
+        return SimpleNamespace(thread_id=thread_id, user_id=owner_id)
+
+    async def fake_delete_workspace(*, user_id: str, thread_id: str) -> None:
+        deleted["workspace"] = (user_id, thread_id)
+
+    store = ArtifactStore(root=tmp_path / "artifacts", audit_file=tmp_path / "audit.jsonl")
+    monkeypatch.setattr(api_endpoints, "get_owned_chat", fake_get_owned_chat)
+    monkeypatch.setattr(api_endpoints, "get_checkpointer", lambda: _Checkpointer())
+    set_artifact_store_for_tests(store)
+    reference = store.register_artifact(
+        user_id=str(user_id),
+        thread_id="thread-123",
+        run_id=None,
+        filename="analysis.py",
+        content=b"print('ok')\n",
+    )
+
+    app = FastAPI()
+    app.include_router(
+        build_api_router(
+            local_principal(user_id=user_id),
+            workspace=ThreadWorkspace(delete=fake_delete_workspace),
+        )
+    )
+    app.dependency_overrides[get_db_session] = lambda: _Session()
+    try:
+        with TestClient(app) as client:
+            response = client.delete("/threads/thread-123")
+        remaining = store.get(str(user_id), reference.artifact_id)
+    finally:
+        set_artifact_store_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "success",
+        "thread_id": "thread-123",
+        "message": "Thread thread-123 deleted successfully",
+    }
+    assert deleted["checkpointer"] == "thread-123"
+    assert deleted["workspace"] == (str(user_id), "thread-123")
+    assert deleted["chat"] == "thread-123"
+    assert deleted["committed"] is True
+    assert remaining is None
