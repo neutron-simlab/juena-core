@@ -46,6 +46,11 @@ dev = [
     "pytest>=9.1.1,<10",
     "pytest-asyncio>=1.4.0,<2",
     "requests>=2.32,<3",
+    # The behavioural UI tests moved into core in plan 02/step 3. Keep the
+    # documented `--group dev` test command self-contained in a fresh venv;
+    # otherwise it only passes when a previous `--extra ui` sync left
+    # Streamlit installed.
+    "streamlit>=1.53.0",
 ]
 
 [tool.pytest.ini_options]
