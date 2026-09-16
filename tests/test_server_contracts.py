@@ -195,6 +195,56 @@ def test_an_application_supplies_its_own_resume_union(local) -> None:
     assert set(schema["discriminator"]["mapping"]) == {"execute_approval", "clarification"}
 
 
+def test_extra_lifespans_unwind_before_the_agents_they_may_be_using(configured, monkeypatch) -> None:
+    """An application's own shutdown runs first; `shutdown_agents` runs last.
+
+    Found during the plan-02 cutover. juena-chatbot ran, in this order,
+    `research_runner.shutdown()` — which waits for specialists running detached
+    from any request — and only then closed its agents. Entering the extra
+    lifespans inside the `try` whose `finally` closed the agents inverted that:
+    the clients would be pulled out from under work still finishing.
+
+    The database lifespan is still open around both, so the original constraint
+    — close agents before the pools they may be using — continues to hold.
+    """
+
+    import contextlib
+
+    from juena_core.server import service as service_module
+
+    events: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def noop():
+        yield
+
+    @contextlib.asynccontextmanager
+    async def application_work():
+        try:
+            yield
+        finally:
+            events.append("extra lifespan exited")
+
+    async def record_shutdown():
+        events.append("agents closed")
+
+    for name in ("database_lifespan", "checkpointer_lifespan", "store_lifespan"):
+        monkeypatch.setattr(service_module, name, noop)
+    monkeypatch.setattr(service_module, "shutdown_agents", record_shutdown)
+
+    # A real identity provider, so no `users` row is upserted at startup:
+    # this test is about ordering, and the database lifespans are stubbed.
+    app = create_app(principal=session_principal, extra_lifespans=(application_work,))
+
+    async def run() -> None:
+        async with app.router.lifespan_context(app):
+            events.append("serving")
+
+    asyncio.run(run())
+
+    assert events == ["serving", "extra lifespan exited", "agents closed"]
+
+
 def test_core_owns_exactly_three_tables() -> None:
     """A model never imported is never created, and fails at first write.
 

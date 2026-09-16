@@ -125,15 +125,23 @@ def create_app(
                 # the database lifespan, so the session factory exists; before
                 # serving, so the first conversation cannot lose the race.
                 await ensure_principal_row(configured_principal)
-            async with AsyncExitStack() as stack:
-                for extra in extra_lifespans:
-                    await stack.enter_async_context(extra())
-                try:
+            try:
+                async with AsyncExitStack() as stack:
+                    for extra in extra_lifespans:
+                        await stack.enter_async_context(extra())
                     yield
-                finally:
-                    # Agents may hold network clients for the process lifetime;
-                    # close them before the pools they may be using go away.
-                    await shutdown_agents()
+            finally:
+                # Agents may hold network clients for the process lifetime;
+                # close them before the pools they may be using go away -- the
+                # pools belong to the database lifespan still open around this.
+                #
+                # **After the extra lifespans have unwound, not before.** An
+                # extra lifespan is application work that may still be *using*
+                # an agent as it stops: juena-chatbot's background research runs
+                # specialists detached from any request, and its shutdown waits
+                # for them. Closing the agents first would pull the clients out
+                # from under work that is still finishing.
+                await shutdown_agents()
 
     app = FastAPI(
         title=title,
