@@ -16,6 +16,7 @@ it is; none of it depends on what a language model would say.
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import timedelta
 from typing import TypedDict
 from uuid import UUID, uuid4
 
@@ -29,7 +30,7 @@ from juena_core.schema.llm_models import BlabladorModelName
 from juena_core.server.agent import registry as registry_module
 from juena_core.server.database import connection as connection_module
 from juena_core.server.database.checkpointer import get_checkpointer
-from juena_core.server.database.models import Base, User
+from juena_core.server.database.models import Base, Chat, User, utc_now
 from juena_core.server.identity import local_principal
 from juena_core.server.service import create_app
 
@@ -189,6 +190,35 @@ def test_listing_can_be_narrowed_to_one_agent(client) -> None:
 
     assert everything == {simulator_thread, advanced_thread}
     assert narrowed == [advanced_thread]
+
+
+def test_authorizing_a_message_touches_chat_recency(client) -> None:
+    """A new turn makes its conversation the most recent one in the list."""
+
+    older = _create_chat(client, SIMULATOR)
+    newer = _create_chat(client, SIMULATOR)
+    factory = connection_module.get_session_factory()
+
+    async def age_chats() -> None:
+        async with factory() as session:
+            older_chat = await session.get(Chat, older)
+            newer_chat = await session.get(Chat, newer)
+            assert older_chat is not None and newer_chat is not None
+            older_chat.updated_at = utc_now() - timedelta(days=2)
+            newer_chat.updated_at = utc_now() - timedelta(days=1)
+            await session.commit()
+
+    import asyncio
+
+    asyncio.run(age_chats())
+    assert client.get(f"/chats?agent_id={SIMULATOR}").json()[0]["thread_id"] == newer
+
+    response = client.post(
+        f"/{SIMULATOR}/stream",
+        json={"message": "touch this thread", "thread_id": older},
+    )
+    assert response.status_code == 200
+    assert client.get(f"/chats?agent_id={SIMULATOR}").json()[0]["thread_id"] == older
 
 
 def test_streaming_another_agents_thread_is_not_found(client) -> None:

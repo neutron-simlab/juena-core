@@ -61,6 +61,22 @@ def test_initialize_client_requires_app_identity_and_timeout() -> None:
         client.close()
 
 
+def test_initialize_client_builds_an_application_client_subclass() -> None:
+    class ApplicationClient(BaseAgentClient):
+        pass
+
+    client = client_setup.initialize_client(
+        "http://api.invalid",
+        "simulator",
+        timeout=19,
+        client_class=ApplicationClient,
+    )
+    try:
+        assert isinstance(client, ApplicationClient)
+    finally:
+        client.close()
+
+
 def test_chat_storage_preserves_and_filters_agent_identity() -> None:
     client = Mock(spec=BaseAgentClient)
     client.get_chat.return_value = None

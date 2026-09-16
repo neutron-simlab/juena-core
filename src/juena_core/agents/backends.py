@@ -232,7 +232,20 @@ class FindingsStateBackend(StateBackend):
     def write(self, file_path: str, content: str) -> WriteResult:
         if self._reserved(file_path):
             return WriteResult(error=self._RESERVED_ERROR)
-        return super().write(self._stored(file_path), content)
+        stored_path = self._stored(file_path)
+        # Deep Agents 0.7 changed StateBackend.write from create-only to an
+        # upsert. Findings accumulate across turns, so silently replacing an
+        # existing report loses evidence. Keep creation and editing as two
+        # explicit operations at this boundary: write_file creates; edit_file
+        # is the only way to change something already established.
+        if stored_path in self._read_files():
+            return WriteResult(
+                error=(
+                    f"File '{stored_path}' already exists. "
+                    "Use edit_file to update it."
+                )
+            )
+        return super().write(stored_path, content)
 
     def edit(
         self,

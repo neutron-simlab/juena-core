@@ -181,7 +181,28 @@ def test_redundant_artifact_export_does_not_request_human_approval() -> None:
     assert requires_execution_approval(request) is True
 
 
-def test_approval_card_reports_the_configured_worker_limits() -> None:
+def test_approval_card_reports_the_configured_worker_limits(monkeypatch, tmp_path) -> None:
+    """The card must describe what the worker will enforce, not a fixed pair.
+
+    Deliberately *not* the default 2 vCPU / 4 GB: an assertion against the
+    defaults passes whether the card reads the configuration or hardcodes it,
+    and this is the defect that shipped -- the development launcher ran the
+    worker at 1 vCPU / 2 GB while the card promised twice that, because the
+    API was never given the same environment.
+    """
+
+    monkeypatch.setattr(
+        sandbox_config,
+        "_sandbox_settings",
+        SandboxRuntimeSettings(
+            enabled=True,
+            identity_secret="t" * 32,
+            workspace_root=tmp_path / "workspaces",
+            cpu_limit="1",
+            memory_limit="2g",
+        ),
+    )
+
     payload = interrupt_event(_interrupt())
 
     assert payload is not None
@@ -189,8 +210,8 @@ def test_approval_card_reports_the_configured_worker_limits() -> None:
     assert payload["limits"] == {
         "timeout_seconds": 600,
         "network": "none",
-        "cpu": "2",
-        "memory": "4g",
+        "cpu": "1",
+        "memory": "2g",
     }
 
 

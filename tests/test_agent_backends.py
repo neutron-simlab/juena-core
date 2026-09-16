@@ -16,6 +16,7 @@ from langgraph.store.memory import InMemoryStore
 from juena_core.agents.backends import (
     MEMORY_SYSTEM_PROMPT,
     MEMORY_SOURCES,
+    FindingsStateBackend,
     ReadOnlyFilesystemBackend,
     ReadOnlyFindingsStateBackend,
     ReadOnlyInputsStateBackend,
@@ -42,6 +43,22 @@ def test_staged_inputs_are_read_only_for_specialists() -> None:
 
     assert backend.write("/inputs/uploads/report.csv", "tampered").error is not None
     assert backend.edit("/inputs/uploads/report.csv", "a", "b").error is not None
+
+
+def test_write_file_cannot_replace_an_existing_finding(monkeypatch) -> None:
+    """Deep Agents 0.7 upserts by default; findings remain create-or-edit."""
+
+    backend = FindingsStateBackend()
+    sent: list[dict[str, object]] = []
+    existing = {"/findings/survey.md": create_file_data("first observation")}
+    monkeypatch.setattr(backend, "_read_files", lambda: existing)
+    monkeypatch.setattr(backend, "_send_files_update", sent.append)
+
+    result = backend.write("/survey.md", "replacement")
+
+    assert "already exists" in str(result.error)
+    assert "edit_file" in str(result.error)
+    assert sent == []
 
 
 def test_supervisor_state_backend_hides_staged_and_scratch_files() -> None:
