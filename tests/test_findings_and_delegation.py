@@ -125,6 +125,33 @@ def test_registration_wraps_every_specialist() -> None:
     assert wrapped[0]["name"] == "a"
 
 
+def test_a_specialist_that_already_has_a_boundary_is_not_wrapped_again() -> None:
+    """The outer wrapper can only ever remove what the inner one allowed.
+
+    An application may subclass the delegate to let one more field back out of
+    its specialists, and it reaches this function through
+    `build_supervisor_middleware`. Wrapping that subclass in a plain
+    `SpecialistDelegate` would drop the extra field with no error at all.
+    """
+
+    class _ExtraField(SpecialistDelegate):
+        def _outbound(self, sent, result):
+            crossing = super()._outbound(sent, result)
+            crossing["module_results"] = {"guide": {"ok": True}}
+            return crossing
+
+    delegate = _ExtraField(_Recorder(), name="a")
+
+    wrapped = with_delegation_boundary(
+        [{"name": "a", "description": "d", "runnable": delegate}]
+    )
+
+    assert wrapped[0]["runnable"] is delegate
+    assert wrapped[0]["runnable"].invoke({"messages": [], "files": {}})[
+        "module_results"
+    ] == {"guide": {"ok": True}}
+
+
 def test_findings_helpers_return_deltas_and_stable_conflict_paths() -> None:
     before = {"/findings/a.md": _file("old"), "/inputs/data.csv": _file("input")}
     after = {

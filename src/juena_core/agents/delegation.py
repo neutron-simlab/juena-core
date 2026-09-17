@@ -79,9 +79,21 @@ class SpecialistDelegate(Runnable[dict[str, Any], dict[str, Any]]):
 
 
 def with_delegation_boundary(specialists: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Wrap each compiled specialist for registration with `SubAgentMiddleware`."""
+    """Wrap each compiled specialist for registration with `SubAgentMiddleware`.
+
+    A specialist that already carries a boundary is left alone. An application
+    may need a boundary of its own -- `vitess-ai` returns one extra field, the
+    validated configuration of the module its specialist just configured -- and
+    it reaches this function through `build_supervisor_middleware`, which
+    applies the boundary itself. Wrapping twice would put core's outbound
+    allowlist outside the application's and silently drop the very field the
+    subclass exists to carry. Wrapping twice is never right in any case: the
+    second wrapper only ever removes what the first allowed.
+    """
 
     return [
-        {**spec, "runnable": SpecialistDelegate(spec["runnable"], name=spec["name"])}
+        spec
+        if isinstance(spec["runnable"], SpecialistDelegate)
+        else {**spec, "runnable": SpecialistDelegate(spec["runnable"], name=spec["name"])}
         for spec in specialists
     ]
