@@ -100,6 +100,48 @@ def _filesystem_tool_names(stack: list) -> set[str]:
     return {tool.name for tool in middleware.tools}
 
 
+def _supervisor_stack(**overrides) -> list:
+    return specialist_runtime.build_supervisor_middleware(
+        backend=build_supervisor_backend(InMemoryStore()),
+        summarizer_model=_summarizer_model(),
+        fallback_models=[],
+        subagents=[_specialist()],
+        **overrides,
+    )
+
+
+def test_a_supervisor_gets_every_filesystem_tool_unless_it_asks_otherwise() -> None:
+    """juena-chatbot's supervisor relies on the default; it must not move."""
+
+    names = _filesystem_tool_names(_supervisor_stack())
+
+    assert {"execute", "delete"} <= names
+
+
+def test_a_supervisor_can_drop_the_tools_its_backend_cannot_serve() -> None:
+    """`execute` and `delete` are a dead affordance on a state backend.
+
+    `vitess-ai`'s two agents run VITESS through one trusted MCP gateway. Neither
+    tool can do anything against `SupervisorStateBackend` -- `execute` answers
+    that the backend implements no sandbox protocol -- and `execute` is the tool
+    a weaker model reaches for when it decides to run the binary itself, which
+    is the one thing a single execution path exists to prevent.
+    """
+
+    names = _filesystem_tool_names(
+        _supervisor_stack(
+            filesystem_tools=("read_file", "write_file", "edit_file", "ls", "glob", "grep")
+        )
+    )
+
+    assert names == {"read_file", "write_file", "edit_file", "ls", "glob", "grep"}
+
+
+def test_a_supervisor_refuses_a_bare_string_of_tool_names() -> None:
+    with pytest.raises(ValueError, match="each be read as a tool name"):
+        _supervisor_stack(filesystem_tools="read_file")
+
+
 def _specialist_stack(monkeypatch: pytest.MonkeyPatch, **overrides) -> list:
     monkeypatch.setattr(specialist_runtime, "settings", lambda: _runtime_settings())
     return specialist_runtime.build_specialist_middleware(

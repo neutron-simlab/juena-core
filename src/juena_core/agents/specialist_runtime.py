@@ -358,6 +358,7 @@ def build_supervisor_middleware(
     memory_system_prompt: str = MEMORY_SYSTEM_PROMPT,
     model_call_limit: int = SUPERVISOR_MODEL_CALL_LIMIT,
     tool_call_limit: int = SUPERVISOR_TOOL_CALL_LIMIT,
+    filesystem_tools: tuple[str, ...] | list[str] | Literal["all"] = "all",
 ) -> list[Any]:
     """Return the canonical supervisor middleware stack.
 
@@ -365,13 +366,33 @@ def build_supervisor_middleware(
     `PatchToolCallsMiddleware` and before `RuntimeModelMiddleware`, preserving
     the established nesting order while letting an application add genuinely
     application-owned cross-cutting behavior.
+
+    `filesystem_tools` narrows what `FilesystemMiddleware` exposes, for the same
+    reason it exists on `build_specialist_middleware` and with the same default
+    of every tool the backend supports. The difference here is which supervisor
+    is asking. One that works in a workspace wants all eight. One whose only way
+    to run anything is a single trusted gateway wants neither `execute` nor
+    `delete`: they cannot work against a `SupervisorStateBackend`, so they are a
+    dead affordance -- and `execute` is the exact tool a weaker model reaches for
+    when it decides to run the domain binary itself, which is the one thing a
+    single execution path exists to prevent. Unlike the specialist version there
+    is no `None`: a supervisor without `read_file` could not read the findings
+    its own specialists write.
     """
+
+    if isinstance(filesystem_tools, str) and filesystem_tools != "all":
+        raise ValueError(
+            "filesystem_tools takes a list or tuple of tool names or \"all\" -- "
+            f"not the bare string {filesystem_tools!r}, whose characters would "
+            "each be read as a tool name"
+        )
 
     return [
         RepeatedToolCallMiddleware(),
         FilesystemMiddleware(
             backend=backend,
             custom_tool_descriptions=SUPERVISOR_FILESYSTEM_TOOL_DESCRIPTIONS,
+            **({} if filesystem_tools == "all" else {"tools": list(filesystem_tools)}),
         ),
         MemoryMiddleware(
             backend=backend,
