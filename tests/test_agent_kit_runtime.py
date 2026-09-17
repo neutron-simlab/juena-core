@@ -139,6 +139,38 @@ def test_an_application_can_narrow_a_specialist_to_the_tools_it_needs(
     assert names == {"read_file"}
 
 
+def test_a_specialist_can_have_no_filesystem_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`read_file` is mandatory in an allowlist, so `None` is the only way to none.
+
+    `vitess-ai`'s module specialists hand off through a typed state channel, not
+    through `/findings/`. None of them can write a file, so the `read_file` they
+    were left with could never have anything to read -- and the prompt then had
+    to describe a tool that did nothing.
+    """
+
+    stack = _specialist_stack(monkeypatch, filesystem_tools=None)
+
+    assert not [
+        item for item in stack if type(item).__name__ == "FilesystemMiddleware"
+    ]
+    assert [type(item).__name__ for item in stack][:3] == [
+        "SpecialistOutcomeMiddleware",
+        "RepeatedToolCallMiddleware",
+        "_DeepAgentsSummarizationMiddleware",
+    ]
+
+
+def test_a_bare_string_of_tool_names_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`Sequence[str]` accepted `"read_file"` and bound eight one-letter tools."""
+
+    with pytest.raises(ValueError, match="not the bare string"):
+        _specialist_stack(monkeypatch, filesystem_tools="read_file")
+
+
 def test_specialist_execution_and_approval_are_a_paired_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

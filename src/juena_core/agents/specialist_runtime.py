@@ -255,7 +255,7 @@ def build_specialist_middleware(
     specialist_name: str,
     skills_dir: Path | None = None,
     skills_label: str = "",
-    filesystem_tools: Sequence[str] | Literal["all"] = "all",
+    filesystem_tools: tuple[str, ...] | list[str] | Literal["all"] | None = "all",
     execution_middleware: Sequence[Any] = (),
     interrupt_on: dict[str, Any] | None = None,
     unattended: bool = False,
@@ -271,8 +271,26 @@ def build_specialist_middleware(
     workspace and wrong for one whose whole job is a conversation and a single
     validation call. A specialist bound to ten tools it will never use spends
     context on them and, on a weaker model, reaches for them. `read_file` is
-    required in any allowlist by the middleware itself.
+    required in any allowlist by the middleware itself, so `None` -- mount no
+    filesystem middleware at all -- is the only way to bind none of them. That
+    is the right answer for a specialist whose hand-off is a typed state
+    channel rather than a `/findings/` file: with no `write_file` anywhere in
+    the agent, `read_file` has nothing to read, and a tool bound to read
+    something that is never written is a claim the prompt then has to explain
+    away.
+
+    A bare string is rejected rather than accepted as a sequence of characters.
+    `Sequence[str]` admitted `"read_file"` by its type and turned it into
+    `['r', 'e', 'a', 'd', ...]`, which the middleware would then reject with a
+    message about a tool named `r`.
     """
+
+    if isinstance(filesystem_tools, str) and filesystem_tools != "all":
+        raise ValueError(
+            "filesystem_tools takes a list or tuple of tool names, \"all\", or "
+            f"None -- not the bare string {filesystem_tools!r}, whose characters "
+            "would each be read as a tool name"
+        )
 
     has_execution = bool(execution_middleware)
     has_interrupt = interrupt_on is not None
@@ -294,14 +312,17 @@ def build_specialist_middleware(
                 sources=[("/skills/", skills_label)],
             )
         )
-    middleware.extend(
-        [
+    if filesystem_tools is not None:
+        middleware.append(
             FilesystemMiddleware(
                 backend=backend,
                 custom_tool_descriptions=dict(filesystem_tool_descriptions),
                 max_execute_timeout=settings().EXECUTE_TIMEOUT_SECONDS,
                 tools="all" if filesystem_tools == "all" else list(filesystem_tools),
-            ),
+            )
+        )
+    middleware.extend(
+        [
             create_summarization_middleware(summarizer_model, backend),
             PatchToolCallsMiddleware(),
             *resilience_middleware(
