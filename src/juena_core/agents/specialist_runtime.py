@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from deepagents.backends import CompositeBackend
@@ -255,6 +255,7 @@ def build_specialist_middleware(
     specialist_name: str,
     skills_dir: Path | None = None,
     skills_label: str = "",
+    filesystem_tools: Sequence[str] | Literal["all"] = "all",
     execution_middleware: Sequence[Any] = (),
     interrupt_on: dict[str, Any] | None = None,
     unattended: bool = False,
@@ -263,6 +264,14 @@ def build_specialist_middleware(
 
     Execution middleware and its approval policy are an all-or-nothing pair.
     Unattended specialists receive neither that pair nor `ask_user`.
+
+    `filesystem_tools` narrows what `FilesystemMiddleware` exposes. It defaults
+    to every tool the backend supports -- eight of them, including `execute`
+    and `delete` -- which is right for a research specialist that works in a
+    workspace and wrong for one whose whole job is a conversation and a single
+    validation call. A specialist bound to ten tools it will never use spends
+    context on them and, on a weaker model, reaches for them. `read_file` is
+    required in any allowlist by the middleware itself.
     """
 
     has_execution = bool(execution_middleware)
@@ -291,6 +300,7 @@ def build_specialist_middleware(
                 backend=backend,
                 custom_tool_descriptions=dict(filesystem_tool_descriptions),
                 max_execute_timeout=settings().EXECUTE_TIMEOUT_SECONDS,
+                tools="all" if filesystem_tools == "all" else list(filesystem_tools),
             ),
             create_summarization_middleware(summarizer_model, backend),
             PatchToolCallsMiddleware(),

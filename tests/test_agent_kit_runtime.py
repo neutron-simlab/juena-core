@@ -93,6 +93,52 @@ def test_supervisor_stack_has_one_exact_extra_splice_point() -> None:
     ]
 
 
+def _filesystem_tool_names(stack: list) -> set[str]:
+    middleware = next(
+        item for item in stack if type(item).__name__ == "FilesystemMiddleware"
+    )
+    return {tool.name for tool in middleware.tools}
+
+
+def _specialist_stack(monkeypatch: pytest.MonkeyPatch, **overrides) -> list:
+    monkeypatch.setattr(specialist_runtime, "settings", lambda: _runtime_settings())
+    return specialist_runtime.build_specialist_middleware(
+        backend=specialist_runtime.build_specialist_backend(),
+        summarizer_model=_summarizer_model(),
+        fallback_models=[],
+        filesystem_tool_descriptions={},
+        specialist_name="test-specialist",
+        **overrides,
+    )
+
+
+def test_a_specialist_gets_every_filesystem_tool_unless_it_asks_otherwise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default is what juena-chatbot's specialists rely on; it must not move."""
+
+    names = _filesystem_tool_names(_specialist_stack(monkeypatch))
+
+    assert {"ls", "read_file", "write_file", "edit_file", "glob", "grep"} <= names
+
+
+def test_an_application_can_narrow_a_specialist_to_the_tools_it_needs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A specialist whose job is a conversation and one tool call should have two.
+
+    `vitess-ai`'s five module specialists were each being bound eleven tools,
+    `execute` and `delete` among them, which is context spent on tools they will
+    never use and, on a weaker model, an invitation to use them.
+    """
+
+    names = _filesystem_tool_names(
+        _specialist_stack(monkeypatch, filesystem_tools=["read_file"])
+    )
+
+    assert names == {"read_file"}
+
+
 def test_specialist_execution_and_approval_are_a_paired_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
