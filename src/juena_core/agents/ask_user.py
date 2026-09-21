@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.types import interrupt
 
@@ -34,6 +36,24 @@ Returns the user's answer as a string."""
 
 
 def _payload(asked_by: str, question: str, options: list[str] | None) -> dict[str, object]:
+    # Some models serialize the complete tool arguments into ``question``.
+    # Recover only that exact envelope so ordinary JSON in a question is untouched.
+    try:
+        nested = json.loads(question)
+    except json.JSONDecodeError:
+        nested = None
+    if (
+        isinstance(nested, dict)
+        and set(nested) <= {"question", "options"}
+        and isinstance(nested.get("question"), str)
+        and nested["question"].strip()
+        and isinstance(nested.get("options", []), list)
+        and all(isinstance(item, str) for item in nested.get("options", []))
+    ):
+        question = nested["question"]
+        if not options:
+            options = nested.get("options", [])
+
     cleaned = [item.strip() for item in (options or []) if item and item.strip()]
     return {
         "kind": CLARIFICATION_KIND,

@@ -31,6 +31,22 @@ def test_the_payload_names_the_asker_and_bounds_the_options() -> None:
     }
 
 
+def test_a_json_encoded_tool_envelope_is_unwrapped() -> None:
+    value = _payload(
+        "readin-specialist",
+        '{"question":"Which setup?\\n\\nChoose one.",'
+        '"options":["Default setup","Customize"]}',
+        [],
+    )
+
+    assert value == {
+        "kind": CLARIFICATION_KIND,
+        "asked_by": "readin-specialist",
+        "question": "Which setup?\n\nChoose one.",
+        "options": ["Default setup", "Customize"],
+    }
+
+
 def test_a_blank_question_is_rejected_before_it_reaches_the_user() -> None:
     tool = build_ask_user_tool("juena")
 
