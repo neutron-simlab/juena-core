@@ -102,6 +102,8 @@ class _StoredArtifact:
     height: int | None
     caption: str
     created_at: str
+    group_id: str | None = None
+    group_label: str | None = None
 
     def public_ref(self) -> ArtifactRef:
         return ArtifactRef(
@@ -114,6 +116,8 @@ class _StoredArtifact:
             height=self.height,
             caption=self.caption,
             created_at=datetime.fromisoformat(self.created_at),
+            group_id=self.group_id,
+            group_label=self.group_label,
         )
 
 
@@ -271,6 +275,8 @@ class ArtifactStore:
         content: bytes,
         caption: str | None = None,
         category: ArtifactCategory = "result",
+        group_id: str | None = None,
+        group_label: str | None = None,
     ) -> ArtifactRef:
         artifact_id = str(uuid4())
         safe_filename = self._safe_filename(filename)
@@ -289,6 +295,8 @@ class ArtifactStore:
             height=height,
             caption=(caption or Path(safe_filename).stem.replace("_", " ")).strip(),
             created_at=created_at,
+            group_id=(group_id or "").strip() or None,
+            group_label=(group_label or "").strip() or None,
         )
 
         with self._lock:

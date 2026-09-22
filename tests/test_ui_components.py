@@ -237,6 +237,48 @@ def test_render_artifacts_displays_plot_and_downloads(monkeypatch) -> None:
     ]
 
 
+def test_render_artifacts_collapses_each_group_into_one_expander(monkeypatch) -> None:
+    download_mock = Mock()
+    expander_mock = Mock(return_value=_DummyContext())
+    monkeypatch.setattr(
+        ui_components,
+        "st",
+        SimpleNamespace(
+            session_state=_SessionState(client=Mock()),
+            expander=expander_mock,
+            download_button=download_mock,
+            caption=Mock(),
+        ),
+    )
+    encoded = base64.b64encode(b"result\n").decode("ascii")
+
+    ui_components.render_artifacts(
+        {
+            "artifacts": [
+                {
+                    "artifact_id": f"file-{index}",
+                    "filename": filename,
+                    "caption": f"VITESS output: {filename}",
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "content_base64": encoded,
+                    "group_id": "simulation-run-1",
+                    "group_label": "Simulation proof · narrow",
+                }
+                for index, filename in enumerate(("monitor1D.dat", "result.txt"))
+            ]
+        }
+    )
+
+    expander_mock.assert_called_once_with(
+        "Simulation proof · narrow (2 files)", expanded=False
+    )
+    assert [call.args[0] for call in download_mock.call_args_list] == [
+        "Download monitor1D.dat",
+        "Download result.txt",
+    ]
+
+
 def test_render_artifact_expand_opens_plot_dialog(monkeypatch) -> None:
     png = _png()
     dialog_mock = Mock()
@@ -356,11 +398,13 @@ def test_render_artifacts_draws_a_repeated_artifact_once_per_run(monkeypatch) ->
 def test_render_artifacts_keeps_unidentified_files_apart(monkeypatch) -> None:
     """Without an id there is nothing to correlate on, so nothing is dropped."""
     download_mock = Mock()
+    expander_mock = Mock(return_value=_DummyContext())
     monkeypatch.setattr(
         ui_components,
         "st",
         SimpleNamespace(
             session_state=_SessionState(client=Mock()),
+            expander=expander_mock,
             download_button=download_mock,
             caption=Mock(),
         ),
@@ -377,3 +421,4 @@ def test_render_artifacts_keeps_unidentified_files_apart(monkeypatch) -> None:
     keys = [call.kwargs["key"] for call in download_mock.call_args_list]
     assert len(keys) == 2
     assert len(set(keys)) == 2
+    expander_mock.assert_called_once_with("Generated files (2 files)", expanded=False)

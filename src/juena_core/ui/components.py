@@ -212,40 +212,72 @@ def render_artifacts(custom_data: dict[str, Any] | None) -> None:
         (item for item in artifacts if isinstance(item, dict)),
         key=lambda item: 0 if item.get("kind") == "image" else 1,
     )
+
+    prepared: list[tuple[dict[str, Any], str, str]] = []
     for artifact in ordered:
-        content = _artifact_bytes(artifact)
-        if not content:
-            st.caption("This generated file is no longer available.")
-            continue
-        caption = str(artifact.get("caption") or artifact.get("filename") or "Plot")
         filename = str(artifact.get("filename") or "result.txt")
-        mime_type = str(artifact.get("mime_type") or "application/octet-stream")
         key = _claim_artifact_key(artifact, filename)
-        if key is None:
+        if key is not None:
+            prepared.append((artifact, filename, key))
+
+    sections: list[
+        tuple[str | None, str | None, list[tuple[dict[str, Any], str, str]]]
+    ] = []
+    grouped_section: dict[str, int] = {}
+    ungrouped_downloads = sum(
+        not str(item[0].get("group_id") or "").strip()
+        and item[0].get("kind") != "image"
+        for item in prepared
+    )
+    for item in prepared:
+        artifact = item[0]
+        group_id = str(artifact.get("group_id") or "").strip()
+        group_label = str(artifact.get("group_label") or "Artifacts").strip()
+        if not group_id and artifact.get("kind") != "image" and ungrouped_downloads > 1:
+            group_id = "__ungrouped_downloads__"
+            group_label = "Generated files"
+        if not group_id:
+            sections.append((None, None, [item]))
             continue
-        if artifact.get("kind") == "image":
-            if not content.startswith(b"\x89PNG\r\n\x1a\n"):
-                st.caption("This generated plot is no longer available.")
-                continue
-            _render_png(content, caption, max_width=f"{PLOT_PREVIEW_WIDTH_PX}px")
-            with st.container(horizontal=True):
-                if st.button(
-                    "Expand plot",
-                    icon=":material/open_in_full:",
-                    help="Open a larger plot preview",
-                    key=f"artifact-expand:{key}",
-                ):
-                    _render_plot_dialog(content, caption)
-                st.download_button(
-                    f"Download {filename}",
-                    data=content,
-                    file_name=filename,
-                    mime=mime_type,
-                    icon=":material/download:",
-                    key=f"artifact-download:{key}",
-                )
-        else:
-            st.caption(caption)
+        if group_id in grouped_section:
+            sections[grouped_section[group_id]][2].append(item)
+            continue
+        grouped_section[group_id] = len(sections)
+        sections.append((group_id, group_label or "Artifacts", [item]))
+
+    for group_id, group_label, items in sections:
+        if group_id is None:
+            _render_artifact(*items[0])
+            continue
+        count = len(items)
+        noun = "file" if count == 1 else "files"
+        with st.expander(f"{group_label} ({count} {noun})", expanded=False):
+            for item in items:
+                _render_artifact(*item)
+
+
+def _render_artifact(artifact: dict[str, Any], filename: str, key: str) -> None:
+    """Render one already-claimed artifact."""
+
+    content = _artifact_bytes(artifact)
+    if not content:
+        st.caption("This generated file is no longer available.")
+        return
+    caption = str(artifact.get("caption") or artifact.get("filename") or "Plot")
+    mime_type = str(artifact.get("mime_type") or "application/octet-stream")
+    if artifact.get("kind") == "image":
+        if not content.startswith(b"\x89PNG\r\n\x1a\n"):
+            st.caption("This generated plot is no longer available.")
+            return
+        _render_png(content, caption, max_width=f"{PLOT_PREVIEW_WIDTH_PX}px")
+        with st.container(horizontal=True):
+            if st.button(
+                "Expand plot",
+                icon=":material/open_in_full:",
+                help="Open a larger plot preview",
+                key=f"artifact-expand:{key}",
+            ):
+                _render_plot_dialog(content, caption)
             st.download_button(
                 f"Download {filename}",
                 data=content,
@@ -254,6 +286,16 @@ def render_artifacts(custom_data: dict[str, Any] | None) -> None:
                 icon=":material/download:",
                 key=f"artifact-download:{key}",
             )
+    else:
+        st.caption(caption)
+        st.download_button(
+            f"Download {filename}",
+            data=content,
+            file_name=filename,
+            mime=mime_type,
+            icon=":material/download:",
+            key=f"artifact-download:{key}",
+        )
 
 
 def finalize_streaming_message(

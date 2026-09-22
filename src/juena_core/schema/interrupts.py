@@ -33,6 +33,8 @@ class ArtifactRef(BaseModel):
     height: int | None = None
     caption: str
     created_at: datetime
+    group_id: str | None = None
+    group_label: str | None = None
 
 
 class ExecutionEvidence(BaseModel):

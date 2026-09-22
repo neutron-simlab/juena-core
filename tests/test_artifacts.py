@@ -63,6 +63,25 @@ def test_stores_inline_png_and_downloadable_script_for_owner(tmp_path) -> None:
     assert store.claim_for_message("user-a", "thread-a") == []
 
 
+def test_artifact_group_survives_persistence_and_message_delivery(tmp_path) -> None:
+    store = _store(tmp_path)
+    artifact = store.register_artifact(
+        user_id="user-a",
+        thread_id="thread-a",
+        run_id="graph-run-1",
+        filename="result.dat",
+        content=b"result\n",
+        group_id="simulation-run-1",
+        group_label="Simulation proof · narrow",
+    )
+
+    assert artifact.group_id == "simulation-run-1"
+    assert artifact.group_label == "Simulation proof · narrow"
+    assert store.claim_for_message("user-a", "thread-a")[0] == artifact.model_dump(
+        mode="json"
+    )
+
+
 def test_execution_records_do_not_consume_the_result_budget(tmp_path) -> None:
     """The production failure, in one assertion.
 
