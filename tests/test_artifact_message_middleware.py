@@ -136,7 +136,7 @@ async def test_artifacts_survive_a_run_that_a_budget_cut_short(store: Any) -> No
     )
 
     final = result["messages"][-1]
-    assert "Stopped after" in str(final.content), "the run did not take the cut-short path"
+    assert "I stopped because" in str(final.content), "the run did not take the cut-short path"
     assert [item["filename"] for item in final.additional_kwargs[ARTIFACT_MESSAGE_KEY]] == [
         "fit.png"
     ]

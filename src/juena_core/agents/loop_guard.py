@@ -29,10 +29,12 @@ REPEAT_ERROR = (
     "report what you have."
 )
 
+#: Written for the user, not the model. On a supervisor nothing turns it into a
+#: report, so it is the final answer the user reads. It says nothing about whether
+#: the repeated call succeeded or failed, so it is true either way.
 STOPPED = (
-    "Stopped after {count} identical calls to `{name}`. Its result was already in "
-    "hand, so repeating it could add nothing. Report what was established before "
-    "this point."
+    "I stopped because I repeated `{name}` {count} times with the same input "
+    "without making progress. Reply “continue” to resume, or rephrase the request."
 )
 
 #: Refusals tolerated before the run ends. The first is a nudge, and a model that

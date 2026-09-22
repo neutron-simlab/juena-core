@@ -170,7 +170,10 @@ def test_a_second_refusal_ends_the_run() -> None:
 
     assert update is not None
     assert update["jump_to"] == "end"
-    assert "Stopped after 3 identical calls to `read_file`" in update["messages"][0].text
+    assert update["messages"][0].text == (
+        "I stopped because I repeated `read_file` 3 times with the same input "
+        "without making progress. Reply “continue” to resume, or rephrase the request."
+    )
 
 
 def test_refusals_from_earlier_in_a_healthy_run_do_not_accumulate() -> None:
@@ -235,4 +238,7 @@ async def test_a_locked_model_is_stopped_rather_than_argued_with() -> None:
     result = await agent.ainvoke({"messages": [("user", "read it")]})
 
     assert ran == ["/a.dat"], "the tool ran more than once"
-    assert "Stopped after 3 identical calls" in str(result["messages"][-1].content)
+    assert str(result["messages"][-1].content) == (
+        "I stopped because I repeated `read_file` 3 times with the same input "
+        "without making progress. Reply “continue” to resume, or rephrase the request."
+    )
