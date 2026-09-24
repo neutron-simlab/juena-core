@@ -596,6 +596,73 @@ async def test_workspace_view_matches_the_files_sent_to_the_graph() -> None:
 # --------------------------------------------------------------------------
 
 
+def test_thread_activity_keeps_deletion_and_writers_apart() -> None:
+    from juena_core.server.api.endpoints import ThreadActivity
+
+    activity = ThreadActivity()
+
+    assert activity.reserve_run("thread-1") is True
+    assert activity.reserve_run("thread-1") is True
+    assert activity.reserve_delete("thread-1") is False
+
+    activity.release_run("thread-1")
+    assert activity.reserve_delete("thread-1") is False
+    activity.release_run("thread-1")
+
+    assert activity.reserve_delete("thread-1") is True
+    assert activity.reserve_run("thread-1") is False
+    assert activity.reserve_delete("thread-1") is False
+
+    activity.release_delete("thread-1")
+    assert activity.reserve_run("thread-1") is True
+    activity.release_run("thread-1")
+
+
+def test_delete_thread_endpoint_refuses_an_active_thread(
+    configured, monkeypatch
+) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from juena_core.server.api import endpoints as api_endpoints
+    from juena_core.server.api.endpoints import ThreadActivity, build_api_router
+    from juena_core.server.database.connection import get_db_session
+
+    user_id = uuid4()
+    deleted: list[str] = []
+
+    class _Session:
+        async def delete(self, value: Any) -> None:
+            deleted.append(value.thread_id)
+
+        async def commit(self) -> None:
+            deleted.append("committed")
+
+    async def fake_get_owned_chat(session, owner_id, thread_id, agent_id=None):
+        return SimpleNamespace(thread_id=thread_id, user_id=owner_id)
+
+    monkeypatch.setattr(api_endpoints, "get_owned_chat", fake_get_owned_chat)
+    activity = ThreadActivity()
+    assert activity.reserve_run("thread-123") is True
+    app = FastAPI()
+    app.include_router(
+        build_api_router(
+            local_principal(user_id=user_id),
+            thread_activity=activity,
+        )
+    )
+    app.dependency_overrides[get_db_session] = lambda: _Session()
+    try:
+        with TestClient(app) as client:
+            response = client.delete("/threads/thread-123")
+    finally:
+        activity.release_run("thread-123")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Thread has an active operation"}
+    assert deleted == []
+
+
 def test_delete_thread_endpoint_removes_persisted_state(configured, monkeypatch, tmp_path) -> None:
     """Deleting a conversation empties every store that kept part of it.
 
@@ -682,7 +749,11 @@ def test_delete_thread_endpoint_reports_workspace_cleanup_failure(
     from fastapi.testclient import TestClient
 
     from juena_core.server.api import endpoints as api_endpoints
-    from juena_core.server.api.endpoints import ThreadWorkspace, build_api_router
+    from juena_core.server.api.endpoints import (
+        ThreadActivity,
+        ThreadWorkspace,
+        build_api_router,
+    )
     from juena_core.server.database.connection import get_db_session
 
     user_id = uuid4()
@@ -711,11 +782,13 @@ def test_delete_thread_endpoint_reports_workspace_cleanup_failure(
         ArtifactStore(root=tmp_path / "artifacts", audit_file=tmp_path / "audit.jsonl")
     )
 
+    activity = ThreadActivity()
     app = FastAPI()
     app.include_router(
         build_api_router(
             local_principal(user_id=user_id),
             workspace=ThreadWorkspace(delete=fail_delete_workspace),
+            thread_activity=activity,
         )
     )
     app.dependency_overrides[get_db_session] = lambda: _Session()
@@ -727,4 +800,6 @@ def test_delete_thread_endpoint_reports_workspace_cleanup_failure(
 
     assert response.status_code == 500
     assert response.json() == {"detail": "Failed to delete thread state"}
-    assert deleted == {"checkpointer": "thread-123"}
+    assert deleted == {}
+    assert activity.reserve_run("thread-123") is True
+    activity.release_run("thread-123")

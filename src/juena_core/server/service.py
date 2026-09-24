@@ -50,7 +50,12 @@ from juena_core.log import get_logger
 from juena_core.schema.interrupts import ClarificationResumeInput
 from juena_core.schema.server import HealthStatus
 from juena_core.server.agent.registry import shutdown_agents
-from juena_core.server.api.endpoints import DEFAULT_CLOSING_NOTE, ThreadWorkspace, build_api_router
+from juena_core.server.api.endpoints import (
+    DEFAULT_CLOSING_NOTE,
+    ThreadActivity,
+    ThreadWorkspace,
+    build_api_router,
+)
 from juena_core.server.chat.endpoints import build_chat_router
 from juena_core.server.database.checkpointer import checkpointer_lifespan
 from juena_core.server.database.connection import database_lifespan
@@ -66,7 +71,13 @@ from juena_core.server.streaming.processor import StreamPolicy
 
 logger = get_logger(__name__)
 
-__all__ = ["register_interrupt_kind", "ThreadWorkspace", "StreamPolicy", "create_app"]
+__all__ = [
+    "register_interrupt_kind",
+    "ThreadActivity",
+    "ThreadWorkspace",
+    "StreamPolicy",
+    "create_app",
+]
 
 
 def create_app(
@@ -74,6 +85,7 @@ def create_app(
     principal: PrincipalDependency,
     resume_input: type[BaseModel] = ClarificationResumeInput,
     workspace: ThreadWorkspace | None = None,
+    thread_activity: ThreadActivity | None = None,
     stream_policy: StreamPolicy | None = None,
     closing_note: str = DEFAULT_CLOSING_NOTE,
     allowed_suffixes: Collection[str] | None = None,
@@ -89,6 +101,7 @@ def create_app(
             A real provider's, or :func:`~juena_core.server.identity.local_principal`.
         resume_input: The application's discriminated resume union.
         workspace: Where a thread's staged files are materialised, if anywhere.
+        thread_activity: Guard shared with application routes that write thread data.
         stream_policy: Custom stream event types and silent tools.
         closing_note: Last paragraph of a staged-input manifest.
         allowed_suffixes: Upload extensions this application accepts.
@@ -158,6 +171,7 @@ def create_app(
             principal,
             resume_input=resume_input,
             workspace=workspace,
+            thread_activity=thread_activity,
             stream_policy=stream_policy,
             closing_note=closing_note,
             allowed_suffixes=allowed_suffixes,

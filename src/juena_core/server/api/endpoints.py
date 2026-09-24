@@ -27,9 +27,11 @@ workspace, its stream policy, and the note closing a staged-input manifest.
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 from fastapi import (
     APIRouter,
@@ -76,7 +78,12 @@ from juena_core.server.streaming.processor import StreamEventProcessor, StreamPo
 
 logger = get_logger(__name__)
 
-__all__ = ["ThreadWorkspace", "DEFAULT_CLOSING_NOTE", "build_api_router"]
+__all__ = [
+    "ThreadActivity",
+    "ThreadWorkspace",
+    "DEFAULT_CLOSING_NOTE",
+    "build_api_router",
+]
 
 #: Closing paragraph of a staged-input manifest when an application supplies
 #: none. Deliberately says only what is true everywhere; an application that
@@ -102,6 +109,41 @@ class ThreadWorkspace:
     stage: Callable[..., Awaitable[None]] | None = None
     #: ``(user_id, thread_id) -> None``, awaited when a thread is deleted.
     delete: Callable[..., Awaitable[None]] | None = None
+
+
+class ThreadActivity:
+    """Coordinate thread writers with deletion inside one API process."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active: dict[str, int] = {}
+        self._deleting: set[str] = set()
+
+    def reserve_run(self, thread_id: str) -> bool:
+        with self._lock:
+            if thread_id in self._deleting:
+                return False
+            self._active[thread_id] = self._active.get(thread_id, 0) + 1
+            return True
+
+    def release_run(self, thread_id: str) -> None:
+        with self._lock:
+            count = self._active.get(thread_id, 0)
+            if count <= 1:
+                self._active.pop(thread_id, None)
+            else:
+                self._active[thread_id] = count - 1
+
+    def reserve_delete(self, thread_id: str) -> bool:
+        with self._lock:
+            if thread_id in self._deleting or self._active.get(thread_id, 0):
+                return False
+            self._deleting.add(thread_id)
+            return True
+
+    def release_delete(self, thread_id: str) -> None:
+        with self._lock:
+            self._deleting.discard(thread_id)
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -165,6 +207,7 @@ def build_api_router(
     *,
     resume_input: type[BaseModel] = ClarificationResumeInput,
     workspace: ThreadWorkspace | None = None,
+    thread_activity: ThreadActivity | None = None,
     stream_policy: StreamPolicy | None = None,
     closing_note: str = DEFAULT_CLOSING_NOTE,
     allowed_suffixes: Collection[str] | None = None,
@@ -179,6 +222,8 @@ def build_api_router(
             an approval it can never raise would describe a pause that cannot
             happen.
         workspace: Where staged files are materialised, if anywhere.
+        thread_activity: Guard shared with application routes that can write a
+            thread workspace while deletion is in progress.
         stream_policy: Custom event types and silent tools this application's
             execution machinery contributes.
         closing_note: Last paragraph of a staged-input manifest.
@@ -187,7 +232,17 @@ def build_api_router(
 
     router = APIRouter()
     workspace = workspace or ThreadWorkspace()
+    thread_activity = thread_activity or ThreadActivity()
     policy = stream_policy or StreamPolicy()
+
+    async def _tracked_stream(
+        stream: AsyncGenerator[str, None], thread_id: str
+    ) -> AsyncGenerator[str, None]:
+        try:
+            async for item in stream:
+                yield item
+        finally:
+            thread_activity.release_run(thread_id)
 
     async def _stream_agent_payloads(
         *,
@@ -253,6 +308,23 @@ def build_api_router(
         chat.updated_at = utc_now()
         await session.commit()
         return chat.thread_id
+
+    async def _reserve_authorized_thread(
+        session: AsyncSession,
+        user: Principal,
+        thread_id: str | None,
+        agent_id: str,
+    ) -> str:
+        """Hold the activity guard across ownership validation and the run."""
+
+        candidate = thread_id or str(uuid4())
+        if not thread_activity.reserve_run(candidate):
+            raise HTTPException(status_code=409, detail="Thread deletion is in progress")
+        try:
+            return await _authorize_thread(session, user, candidate, agent_id)
+        except BaseException:
+            thread_activity.release_run(candidate)
+            raise
 
     async def _prepare_agent_invocation(
         *,
@@ -449,10 +521,15 @@ def build_api_router(
         """
 
         resolved = _resolve_agent_id(agent_id)
-        user_input.thread_id = await _authorize_thread(
+        user_input.thread_id = await _reserve_authorized_thread(
             session, user, user_input.thread_id, resolved
         )
-        return EventSourceResponse(message_generator(user_input, str(user.id), resolved))
+        return EventSourceResponse(
+            _tracked_stream(
+                message_generator(user_input, str(user.id), resolved),
+                user_input.thread_id,
+            )
+        )
 
     @router.post(
         "/{agent_id}/stream_with_files",
@@ -487,11 +564,19 @@ def build_api_router(
                 ) from e
         if (model_value := _form_field(model)) is not None:
             user_input.model = model_value
-        user_input.thread_id = await _authorize_thread(
+        user_input.thread_id = await _reserve_authorized_thread(
             session, user, user_input.thread_id, resolved
         )
         return EventSourceResponse(
-            message_generator(user_input, str(user.id), resolved, attachments=attachments)
+            _tracked_stream(
+                message_generator(
+                    user_input,
+                    str(user.id),
+                    resolved,
+                    attachments=attachments,
+                ),
+                user_input.thread_id,
+            )
         )
 
     @router.post(
@@ -509,11 +594,22 @@ def build_api_router(
         """Resume a pending interrupt after an authenticated reply."""
 
         resolved = _resolve_agent_id(agent_id)
+        if not thread_activity.reserve_run(payload.thread_id):
+            raise HTTPException(status_code=409, detail="Thread deletion is in progress")
         try:
             await get_owned_chat(session, user.id, payload.thread_id, agent_id=resolved)
         except ChatNotFoundError as exc:
+            thread_activity.release_run(payload.thread_id)
             raise HTTPException(status_code=404, detail="Chat not found") from exc
-        return EventSourceResponse(resume_generator(payload, str(user.id), resolved))
+        except BaseException:
+            thread_activity.release_run(payload.thread_id)
+            raise
+        return EventSourceResponse(
+            _tracked_stream(
+                resume_generator(payload, str(user.id), resolved),
+                payload.thread_id,
+            )
+        )
 
     @router.get("/threads/{thread_id}/pending-approval")
     @router.get("/threads/{thread_id}/pending-interrupt")
@@ -572,10 +668,27 @@ def build_api_router(
 
         try:
             chat = await get_owned_chat(session, user.id, thread_id, agent_id=None)
-            await get_checkpointer().adelete_thread(thread_id)
-            get_artifact_store().delete_thread(str(user.id), thread_id)
+        except ChatNotFoundError as e:
+            raise HTTPException(status_code=404, detail="Chat not found") from e
+
+        if not thread_activity.reserve_delete(thread_id):
+            raise HTTPException(status_code=409, detail="Thread has an active operation")
+
+        try:
+            # The first ownership lookup may have raced with another completed
+            # deletion before this request acquired the guard. Recheck while
+            # holding it so stale authorization cannot clean up a vanished row.
+            try:
+                chat = await get_owned_chat(session, user.id, thread_id, agent_id=None)
+            except ChatNotFoundError as e:
+                raise HTTPException(status_code=404, detail="Chat not found") from e
+
+            checkpointer = get_checkpointer()
+            artifact_store = get_artifact_store()
             if workspace.delete is not None:
                 await workspace.delete(user_id=str(user.id), thread_id=thread_id)
+            await checkpointer.adelete_thread(thread_id)
+            artifact_store.delete_thread(str(user.id), thread_id)
             await session.delete(chat)
             await session.commit()
             return {
@@ -583,14 +696,13 @@ def build_api_router(
                 "thread_id": thread_id,
                 "message": f"Thread {thread_id} deleted successfully",
             }
-        except ChatNotFoundError as e:
-            raise HTTPException(status_code=404, detail="Chat not found") from e
-        except RuntimeError as e:
-            logger.error("Checkpointer unavailable while deleting thread %s: %s", thread_id, e)
-            raise HTTPException(status_code=500, detail=str(e)) from e
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error("Failed to delete thread %s: %s", thread_id, e, exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to delete thread state") from e
+        finally:
+            thread_activity.release_delete(thread_id)
 
     @router.get("/artifacts/{artifact_id}")
     async def get_artifact(
