@@ -54,6 +54,17 @@ def test_provider_availability_requires_complete_credentials(monkeypatch) -> Non
     }
 
 
+def test_default_model_comes_from_application_settings(monkeypatch) -> None:
+    config = make_settings(
+        BLABLADOR_DEFAULT_MODEL=BlabladorModelName.QWEN38_FLASH_NEXT.value
+    )
+    monkeypatch.setattr(providers, "settings", lambda: config)
+
+    assert providers.get_default_model("blablador") == (
+        "02 - Qwen3.8-Flash-Next-NVFP4, general purpose large model"
+    )
+
+
 def test_blablador_kwargs_include_endpoint_and_measured_profile(monkeypatch) -> None:
     config = make_settings()
     monkeypatch.setattr(providers, "settings", lambda: config)

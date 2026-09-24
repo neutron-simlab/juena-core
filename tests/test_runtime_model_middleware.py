@@ -55,3 +55,33 @@ def test_runtime_model_middleware_uses_runtime_context(monkeypatch) -> None:
         "temperature": 0.0,
         "streaming": True,
     }
+
+
+def test_runtime_model_middleware_does_not_explicitly_disable_streaming(
+    monkeypatch,
+) -> None:
+    """LangGraph messages mode must remain free to attach its stream callback."""
+
+    created: dict[str, object] = {}
+    middleware = middleware_module.RuntimeModelMiddleware()
+
+    def fake_create_llm(**kwargs: object) -> object:
+        created["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(middleware_module, "build_chat_model", fake_create_llm)
+    request = _FakeRequest(
+        context=middleware_module.RuntimeModelContext(
+            provider="blablador",
+            model="minimax-test",
+        ),
+        model=SimpleNamespace(streaming=False),
+    )
+
+    middleware.wrap_model_call(request, lambda updated_request: updated_request.model)
+
+    assert created["kwargs"] == {
+        "provider": "blablador",
+        "model": "minimax-test",
+        "temperature": 0.0,
+    }

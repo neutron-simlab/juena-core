@@ -227,23 +227,40 @@ def resilience_middleware(
     return middleware
 
 
-def build_fallback_models() -> list[Any]:
-    """Build deployment-level fallbacks independently of the request model."""
+def build_fallback_models(
+    model_specs: Sequence[tuple[str, str]] | None = None,
+) -> list[Any]:
+    """Build ordered deployment fallbacks independently of the request model.
 
-    fallback_provider = (settings().FALLBACK_PROVIDER or "").strip().lower()
-    if not fallback_provider:
-        return []
-    if not get_available_providers().get(fallback_provider, False):
-        logger.warning(
-            "FALLBACK_PROVIDER '%s' is not configured; running without a model fallback",
-            fallback_provider,
-        )
-        return []
-    fallback_model = get_default_model(fallback_provider)
-    if not fallback_model:
-        return []
-    logger.info("Model fallback enabled: %s/%s", fallback_provider, fallback_model)
-    return [build_chat_model(provider=fallback_provider, model=fallback_model)]
+    Applications with a deliberate model order pass explicit ``(provider,
+    model)`` pairs. Callers that omit them retain the provider-level fallback
+    configured in :class:`CoreSettings`.
+    """
+
+    if model_specs is None:
+        fallback_provider = (settings().FALLBACK_PROVIDER or "").strip().lower()
+        if not fallback_provider:
+            return []
+        fallback_model = get_default_model(fallback_provider)
+        model_specs = ((fallback_provider, fallback_model),) if fallback_model else ()
+
+    available = get_available_providers()
+    fallback_models: list[Any] = []
+    for provider, model in model_specs:
+        provider = provider.strip().lower()
+        model = model.strip()
+        if not provider or not model:
+            continue
+        if not available.get(provider, False):
+            logger.warning(
+                "Fallback provider '%s' is not configured; skipping model '%s'",
+                provider,
+                model,
+            )
+            continue
+        logger.info("Model fallback enabled: %s/%s", provider, model)
+        fallback_models.append(build_chat_model(provider=provider, model=model))
+    return fallback_models
 
 
 def build_specialist_middleware(

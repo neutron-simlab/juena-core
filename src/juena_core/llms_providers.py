@@ -171,12 +171,15 @@ def get_available_models(provider: str) -> list[str]:
 
 
 def get_default_model(provider: str) -> str:
-    """Return the built-in default model, or ``""`` for an unknown provider."""
+    """Return the embedding application's configured provider default."""
 
-    try:
-        return get_default_model_for_provider(Provider(provider.lower()))
-    except ValueError:
-        return ""
+    config = settings()
+    provider = provider.lower()
+    if provider == Provider.OPENAI.value:
+        return config.OPENAI_DEFAULT_MODEL
+    if provider == Provider.BLABLADOR.value:
+        return config.BLABLADOR_DEFAULT_MODEL
+    return ""
 
 
 def format_model_name(provider: str, model: str) -> str:

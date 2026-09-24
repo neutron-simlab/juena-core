@@ -12,6 +12,8 @@ from juena_core.schema.llm_models import (
 def test_blablador_models_include_minimax() -> None:
     models = get_models_for_provider(Provider.BLABLADOR)
 
+    assert BlabladorModelName.QWEN38_FLASH_NEXT.value in models
+    assert BlabladorModelName.MIMO_V26_PRO.value in models
     assert BlabladorModelName.GPT_OSS.value in models
     assert BlabladorModelName.MINIMAX_M27.value in models
     assert BlabladorModelName.QWEN35_122B.value in models
@@ -37,7 +39,13 @@ def test_blablador_display_names_hide_provider_ranking_prefixes() -> None:
         for model in BlabladorModelName
     ]
 
-    assert labels == ["GPT-OSS-120b", "MiniMax-M2.7", "QWEN3.5-122B"]
+    assert labels == [
+        "GPT-OSS-120b",
+        "Qwen3.8-Flash-Next",
+        "MiMo-V2.6-Pro",
+        "MiniMax-M2.7",
+        "QWEN3.5-122B",
+    ]
     assert all(not label[:1].isdigit() for label in labels)
 
 

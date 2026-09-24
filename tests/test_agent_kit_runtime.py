@@ -357,3 +357,29 @@ def test_fallback_model_uses_only_configured_available_provider(
 
     assert len(specialist_runtime.build_fallback_models()) == 1
     assert built == [{"provider": "openai", "model": "fallback-model"}]
+
+
+def test_explicit_fallback_models_preserve_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        specialist_runtime,
+        "get_available_providers",
+        lambda: {"blablador": True},
+    )
+    monkeypatch.setattr(
+        specialist_runtime,
+        "build_chat_model",
+        lambda **kwargs: built.append(kwargs) or object(),
+    )
+
+    fallbacks = specialist_runtime.build_fallback_models(
+        [(" BLABLADOR ", "mimo-pro"), ("blablador", "gpt-oss")]
+    )
+
+    assert len(fallbacks) == 2
+    assert built == [
+        {"provider": "blablador", "model": "mimo-pro"},
+        {"provider": "blablador", "model": "gpt-oss"},
+    ]

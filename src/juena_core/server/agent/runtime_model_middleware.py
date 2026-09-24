@@ -81,12 +81,19 @@ class RuntimeModelMiddleware(AgentMiddleware):
         try:
             # build_chat_model caches on (provider, model, temperature, overrides),
             # so this does not rebuild a connection pool on every model call.
-            llm = build_chat_model(
-                provider=provider,
-                model=model,
-                temperature=0.0,
-                streaming=bool(getattr(request.model, "streaming", False)),
-            )
+            model_kwargs: dict[str, Any] = {
+                "provider": provider,
+                "model": model,
+                "temperature": 0.0,
+            }
+            # Explicit ``streaming=False`` sets LangChain's internal
+            # ``_streaming_disabled`` flag. That prevents LangGraph's messages mode
+            # from attaching its streaming callback after a runtime model swap. True
+            # is meaningful and must be preserved; false means leave the option
+            # unset, as the original production model does.
+            if bool(getattr(request.model, "streaming", False)):
+                model_kwargs["streaming"] = True
+            llm = build_chat_model(**model_kwargs)
         except Exception:
             logger.exception(
                 "Failed to create runtime LLM for provider=%s model=%s", provider, model

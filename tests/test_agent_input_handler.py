@@ -41,6 +41,16 @@ def test_build_run_context_puts_identity_in_config_and_context(configured) -> No
     assert run.context.run_id == str(run.config["run_id"])
 
 
+def test_build_run_context_uses_the_application_provider_default(configured) -> None:
+    run = AgentInputHandler.build_run_context(
+        thread_id="thread-1",
+        user_id="user-1",
+        provider="blablador",
+    )
+
+    assert run.context.model == configured.BLABLADOR_DEFAULT_MODEL
+
+
 def test_build_input_carries_only_message_channels() -> None:
     input_data = AgentInputHandler.build_input("hello")
 

@@ -22,8 +22,8 @@ from typing import Any
 from langgraph.graph.state import CompiledStateGraph
 
 from juena_core.config import settings
+from juena_core.llms_providers import get_default_model
 from juena_core.log import get_logger
-from juena_core.schema.llm_models import Provider, get_default_model_for_provider
 from juena_core.server.errors import AgentNotFoundError
 
 logger = get_logger(__name__)
@@ -116,9 +116,8 @@ def _normalize_provider_model(provider: str | None, model: str | None) -> tuple[
         provider = config.DEFAULT_PROVIDER
 
     if model is None:
-        try:
-            model = get_default_model_for_provider(Provider(provider))
-        except ValueError:
+        model = get_default_model(provider)
+        if not model:
             # An unrecognized provider name resets both halves of the pair.
             provider = config.DEFAULT_PROVIDER
             model = config.DEFAULT_MODEL
