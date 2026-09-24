@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -13,6 +15,7 @@ from langchain_core.messages import (
     ChatMessage as LangchainChatMessage,
 )
 
+from juena_core.agents.specialist_outcome import VERIFIED_CLOSE, VERIFIED_OPEN
 from juena_core.artifacts import ARTIFACT_MESSAGE_KEY
 from juena_core.schema.server import ChatMessage
 from juena_core.server.chat.input_constants import (
@@ -25,6 +28,7 @@ __all__ = [
     "reasoning_from",
     "display_text_from",
     "display_attachments_from",
+    "answer_text_from",
     "langchain_to_chat_message",
 ]
 
@@ -32,6 +36,13 @@ __all__ = [
 # answer. Surfaced separately so the UI can collapse them instead of splicing
 # them into the response text.
 _REASONING_BLOCK_TYPES = frozenset({"reasoning", "thinking"})
+
+# The execution evidence the server appends to a final answer, with the blank
+# line in front of it.
+_VERIFIED_BLOCK = re.compile(
+    rf"\s*{re.escape(VERIFIED_OPEN)}.*?{re.escape(VERIFIED_CLOSE)}",
+    re.DOTALL,
+)
 
 
 def message_text(message: BaseMessage) -> str:
@@ -91,6 +102,19 @@ def display_attachments_from(message: BaseMessage) -> list[dict[str, object]]:
     return [item for item in attachments if isinstance(item, dict)]
 
 
+def answer_text_from(message: BaseMessage) -> str:
+    """Return an AI message's text without the server's evidence block.
+
+    The block is appended after the model has written its answer, and it is
+    written for the model's next turn, not for the reader. The live stream sends
+    the answer before the block exists, so the user never sees it there; a
+    reloaded thread reads the checkpointed message, block included, and would
+    otherwise render the full execution log under the answer.
+    """
+
+    return _VERIFIED_BLOCK.sub("", message_text(message))
+
+
 def langchain_to_chat_message(message: BaseMessage) -> ChatMessage:
     """Create a :class:`ChatMessage` from a LangChain message."""
 
@@ -110,7 +134,7 @@ def langchain_to_chat_message(message: BaseMessage) -> ChatMessage:
             ai_message = ChatMessage(
                 type="ai",
                 id=message_id,
-                content=message_text(message),
+                content=answer_text_from(message),
             )
             if message.tool_calls:
                 ai_message.tool_calls = message.tool_calls

@@ -1,9 +1,12 @@
 """Tests for server message conversion helpers."""
 
+from types import SimpleNamespace
+
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages import ChatMessage as LangchainChatMessage
 
+from juena_core.agents.specialist_outcome import ExecutionEvidenceMiddleware
 from juena_core.server.utils import langchain_to_chat_message
 
 
@@ -92,3 +95,33 @@ def test_plain_human_message_is_unaffected() -> None:
 
     assert chat_message.content == "hello"
     assert "attachments" not in chat_message.custom_data
+
+
+def test_reloaded_answer_hides_the_server_evidence_block() -> None:
+    """The live stream sends the answer before the server appends its evidence
+    block, so the user never sees the block. A reloaded thread reads the
+    checkpointed message, block included, and must render the same answer."""
+    update = ExecutionEvidenceMiddleware(agent_name="advanced_mode").after_agent(
+        {
+            "messages": [AIMessage("All twelve runs finished.", id="answer-1")],
+            "execution_events": [
+                {
+                    "graph_run_id": "run-1",
+                    "command": "run sweep",
+                    "status": "completed",
+                    "exit_code": 0,
+                    "dropped": [
+                        ("geometry.inf", "Generated file type is not allowed for chat delivery")
+                    ],
+                }
+            ],
+        },
+        SimpleNamespace(context={}, config={"run_id": "run-1"}),
+    )
+    checkpointed = update["messages"][0]
+    # The model still reads the block on its next turn.
+    assert "<verified_by_server>" in checkpointed.text
+
+    chat_message = langchain_to_chat_message(checkpointed)
+
+    assert chat_message.content == "All twelve runs finished."
