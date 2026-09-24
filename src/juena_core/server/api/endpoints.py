@@ -575,12 +575,7 @@ def build_api_router(
             await get_checkpointer().adelete_thread(thread_id)
             get_artifact_store().delete_thread(str(user.id), thread_id)
             if workspace.delete is not None:
-                try:
-                    await workspace.delete(user_id=str(user.id), thread_id=thread_id)
-                except Exception:
-                    logger.warning(
-                        "Unable to delete the workspace for thread %s", thread_id, exc_info=True
-                    )
+                await workspace.delete(user_id=str(user.id), thread_id=thread_id)
             await session.delete(chat)
             await session.commit()
             return {

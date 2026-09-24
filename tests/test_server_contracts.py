@@ -671,3 +671,60 @@ def test_delete_thread_endpoint_removes_persisted_state(configured, monkeypatch,
     assert deleted["chat"] == "thread-123"
     assert deleted["committed"] is True
     assert remaining is None
+
+
+def test_delete_thread_endpoint_reports_workspace_cleanup_failure(
+    configured, monkeypatch, tmp_path
+) -> None:
+    """A surviving workspace must not be reported as a successful deletion."""
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from juena_core.server.api import endpoints as api_endpoints
+    from juena_core.server.api.endpoints import ThreadWorkspace, build_api_router
+    from juena_core.server.database.connection import get_db_session
+
+    user_id = uuid4()
+    deleted: dict[str, Any] = {}
+
+    class _Checkpointer:
+        async def adelete_thread(self, thread_id: str) -> None:
+            deleted["checkpointer"] = thread_id
+
+    class _Session:
+        async def delete(self, value: Any) -> None:
+            deleted["chat"] = value.thread_id
+
+        async def commit(self) -> None:
+            deleted["committed"] = True
+
+    async def fake_get_owned_chat(session, owner_id, thread_id, agent_id=None):
+        return SimpleNamespace(thread_id=thread_id, user_id=owner_id)
+
+    async def fail_delete_workspace(*, user_id: str, thread_id: str) -> None:
+        raise OSError("workspace is still mounted")
+
+    monkeypatch.setattr(api_endpoints, "get_owned_chat", fake_get_owned_chat)
+    monkeypatch.setattr(api_endpoints, "get_checkpointer", lambda: _Checkpointer())
+    set_artifact_store_for_tests(
+        ArtifactStore(root=tmp_path / "artifacts", audit_file=tmp_path / "audit.jsonl")
+    )
+
+    app = FastAPI()
+    app.include_router(
+        build_api_router(
+            local_principal(user_id=user_id),
+            workspace=ThreadWorkspace(delete=fail_delete_workspace),
+        )
+    )
+    app.dependency_overrides[get_db_session] = lambda: _Session()
+    try:
+        with TestClient(app) as client:
+            response = client.delete("/threads/thread-123")
+    finally:
+        set_artifact_store_for_tests(None)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Failed to delete thread state"}
+    assert deleted == {"checkpointer": "thread-123"}
