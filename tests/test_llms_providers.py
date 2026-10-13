@@ -89,6 +89,21 @@ def test_blablador_kwargs_include_endpoint_and_measured_profile(monkeypatch) -> 
     }
 
 
+def test_juwels_qwen_profile_reserves_output_within_served_context(monkeypatch) -> None:
+    monkeypatch.setattr(providers, "settings", make_settings)
+
+    kwargs = providers._model_kwargs(
+        "blablador",
+        "90 - Qwen 3.8-Flash-Next-125B-AWQ-W4A16 on Juwels Booster - "
+        "An excellent model from September 2026",
+        0.0,
+        {"max_tokens": 32_768},
+    )
+
+    assert kwargs["max_tokens"] == 32_768
+    assert kwargs["profile"] == {"max_input_tokens": 907_232}
+
+
 def test_build_chat_model_reuses_hashable_constructions(monkeypatch) -> None:
     config = make_settings()
     built: list[tuple[object, ...]] = []
