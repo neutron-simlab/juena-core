@@ -5,9 +5,11 @@
 # `tests/` is included deliberately: a test that pulls an application in is
 # how this rule actually gets broken, and it would otherwise go unnoticed
 # until someone installed core on its own.
+# Tracing vendors count too: core only offers the hook in juena_core.tracing,
+# and which tracer runs is the application's choice.
 set -euo pipefail
-if grep -rnE '^\s*(from|import) (juena|vitess_ai|juena_rag)\b' src/ tests/; then
-    echo "juena_core imported an application. The dependency runs one way." >&2
+if grep -rnE '^\s*(from|import) (juena|vitess_ai|juena_rag|langfuse|langsmith)\b' src/ tests/; then
+    echo "juena_core imported an application or a tracing vendor. The dependency runs one way." >&2
     exit 1
 fi
 echo "import direction ok"

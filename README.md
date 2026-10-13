@@ -147,6 +147,25 @@ application-owned resources. Use `ThreadWorkspace` when an external process
 must see staged files, and `StreamPolicy` to allow application events or
 silence noisy tools.
 
+Tracing is the application's choice too. LangSmith switches itself on from
+its environment variables and needs nothing here. A tracer that works as a
+LangChain callback handler, such as Langfuse, is attached with one hook that
+core calls for every run it starts:
+
+```python
+from juena_core.tracing import RunTracing, configure_tracing
+
+
+def run_tracing(*, thread_id: str, user_id: str) -> RunTracing:
+    return RunTracing(callbacks=(my_handler,), metadata={"session": thread_id})
+
+
+configure_tracing(run_tracing)  # once, before create_app()
+```
+
+Core itself never imports a tracing vendor; `tests/test_import_boundary.py`
+enforces that.
+
 ## Client and UI
 
 `BaseAgentClient` is synchronous and owns only routes served by core:

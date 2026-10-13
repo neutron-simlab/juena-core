@@ -22,6 +22,7 @@ from juena_core.server.chat.input_constants import (
     DISPLAY_TEXT_KEY,
 )
 from juena_core.server.chat.input_types import UploadedAttachment
+from juena_core.tracing import with_tracing
 
 logger = get_logger(__name__)
 
@@ -72,7 +73,13 @@ class AgentInputHandler:
             "model": model,
         }
         return AgentRunContext(
-            config=RunnableConfig(configurable=configurable, run_id=run_id),
+            # New turns, resumes and interrupt reads all start here, so this is
+            # the one place the application's tracer is attached.
+            config=with_tracing(
+                RunnableConfig(configurable=configurable, run_id=run_id),
+                thread_id=thread_id,
+                user_id=user_id,
+            ),
             context=RuntimeModelContext(
                 provider=provider,
                 model=model,
