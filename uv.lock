@@ -1236,6 +1236,7 @@ name = "juena-core"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "deepagents" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -1277,6 +1278,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4" },
     { name = "deepagents", specifier = ">=0.7.13,<0.8" },
     { name = "fastapi" },
     { name = "httpx" },

@@ -30,6 +30,7 @@ import json
 import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 from uuid import uuid4
 
@@ -74,6 +75,7 @@ from juena_core.server.interrupts import (
     interrupt_event,
 )
 from juena_core.server.streaming import events
+from juena_core.server.streaming.own_task import AgentStreamResponse
 from juena_core.server.streaming.processor import StreamEventProcessor, StreamPolicy
 
 logger = get_logger(__name__)
@@ -234,15 +236,6 @@ def build_api_router(
     workspace = workspace or ThreadWorkspace()
     thread_activity = thread_activity or ThreadActivity()
     policy = stream_policy or StreamPolicy()
-
-    async def _tracked_stream(
-        stream: AsyncGenerator[str, None], thread_id: str
-    ) -> AsyncGenerator[str, None]:
-        try:
-            async for item in stream:
-                yield item
-        finally:
-            thread_activity.release_run(thread_id)
 
     async def _stream_agent_payloads(
         *,
@@ -524,11 +517,11 @@ def build_api_router(
         user_input.thread_id = await _reserve_authorized_thread(
             session, user, user_input.thread_id, resolved
         )
-        return EventSourceResponse(
-            _tracked_stream(
-                message_generator(user_input, str(user.id), resolved),
-                user_input.thread_id,
-            )
+        # The response owns the run: however it ends, the agent is stopped
+        # and cleaned up before the thread is released.
+        return AgentStreamResponse(
+            message_generator(user_input, str(user.id), resolved),
+            on_close=partial(thread_activity.release_run, user_input.thread_id),
         )
 
     @router.post(
@@ -567,16 +560,14 @@ def build_api_router(
         user_input.thread_id = await _reserve_authorized_thread(
             session, user, user_input.thread_id, resolved
         )
-        return EventSourceResponse(
-            _tracked_stream(
-                message_generator(
-                    user_input,
-                    str(user.id),
-                    resolved,
-                    attachments=attachments,
-                ),
-                user_input.thread_id,
-            )
+        return AgentStreamResponse(
+            message_generator(
+                user_input,
+                str(user.id),
+                resolved,
+                attachments=attachments,
+            ),
+            on_close=partial(thread_activity.release_run, user_input.thread_id),
         )
 
     @router.post(
@@ -604,11 +595,9 @@ def build_api_router(
         except BaseException:
             thread_activity.release_run(payload.thread_id)
             raise
-        return EventSourceResponse(
-            _tracked_stream(
-                resume_generator(payload, str(user.id), resolved),
-                payload.thread_id,
-            )
+        return AgentStreamResponse(
+            resume_generator(payload, str(user.id), resolved),
+            on_close=partial(thread_activity.release_run, payload.thread_id),
         )
 
     @router.get("/threads/{thread_id}/pending-approval")
