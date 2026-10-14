@@ -242,8 +242,9 @@ def test_failed_pending_lookup_is_retried_on_the_next_run(
         SimpleNamespace(session_state=state, warning=warning),
     )
 
-    assert streaming.render_pending_interrupt() is False
-    assert streaming.render_pending_interrupt() is False
+    # Keep the composer hidden until the pending state can be established.
+    assert streaming.render_pending_interrupt() is True
+    assert streaming.render_pending_interrupt() is True
 
     assert client.get_pending_interrupt.call_count == 2
     assert state.approval_checked_threads == set()

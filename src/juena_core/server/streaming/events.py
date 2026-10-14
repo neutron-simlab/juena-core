@@ -96,6 +96,24 @@ def approval_required_event(
 
     action_requests = value.get("action_requests") or []
     review_configs = value.get("review_configs") or []
+    if len(action_requests) > 1:
+        # Keep the single-command wire shape for existing clients. A batch
+        # carries every action in the order the middleware expects decisions.
+        return {
+            "type": "approval_required",
+            "interrupt_id": interrupt_id,
+            "actions": [
+                approval_required_event(
+                    interrupt_id,
+                    {
+                        "action_requests": [action],
+                        "review_configs": review_configs[index:index + 1],
+                    },
+                    extra_limits=extra_limits,
+                )
+                for index, action in enumerate(action_requests)
+            ],
+        }
     action = action_requests[0] if action_requests and isinstance(action_requests[0], dict) else {}
     review = review_configs[0] if review_configs and isinstance(review_configs[0], dict) else {}
     args = action.get("args") if isinstance(action.get("args"), dict) else {}

@@ -346,9 +346,7 @@ class BaseAgentClient:
                 raise AgentClientError(f"Server returned invalid message: {exc}") from exc
 
         if parsed_type == "error":
-            return ChatMessage(
-                type="ai", content="Error: " + parsed.get("content", "Unknown error")
-            )
+            raise AgentClientError(parsed.get("content") or "Unknown server error")
 
         if parsed_type == "thread":
             return {"type": "thread", "thread_id": parsed.get("thread_id", "")}
@@ -375,6 +373,8 @@ class BaseAgentClient:
             }
 
         if parsed_type == "approval_required":
+            if "actions" in parsed:
+                return parsed
             return {
                 "type": "approval_required",
                 "interrupt_id": parsed.get("interrupt_id", ""),

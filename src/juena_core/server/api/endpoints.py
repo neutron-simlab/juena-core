@@ -341,6 +341,9 @@ def build_api_router(
             model=model,
         )
 
+        if await first_pending_interrupt(agent, run.config) is not None:
+            raise ValueError("Answer the pending question or approval before sending a new message")
+
         prepared = await prepare_code_chat_turn_inputs(
             agent,
             run.config,
@@ -631,7 +634,10 @@ def build_api_router(
             model=model,
         )
         empty: dict[str, Any] = {"approval": None, "clarification": None}
-        pending = await first_pending_interrupt(agent, run.config)
+        try:
+            pending = await first_pending_interrupt(agent, run.config)
+        except ResumeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if pending is None:
             return empty
         interrupt, _kind = pending

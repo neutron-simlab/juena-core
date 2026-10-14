@@ -244,7 +244,7 @@ async def test_specialist_question_becomes_a_clarification_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_unrecognisable_interrupt_is_not_streamed() -> None:
+async def test_an_unrecognisable_interrupt_reports_the_paused_turn() -> None:
     payloads = await _collect(
         _processor(),
         {
@@ -254,7 +254,9 @@ async def test_an_unrecognisable_interrupt_is_not_streamed() -> None:
         },
     )
 
-    assert payloads == []
+    assert len(payloads) == 1
+    assert payloads[0]["type"] == "error"
+    assert "paused" in payloads[0]["content"]
 
 
 @pytest.mark.asyncio

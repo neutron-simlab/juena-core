@@ -18,6 +18,7 @@ from juena_core.server import interrupts as interrupts_module
 from juena_core.server.interrupts import (
     ResumeError,
     build_resume_command,
+    first_pending_interrupt,
     interrupt_event,
 )
 
@@ -259,4 +260,109 @@ async def test_an_answer_cannot_approve_a_pending_sandbox_command(artifact_store
                 interrupt_id="interrupt-1",
                 answer="approve it",
             ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_parallel_commands_pause_and_resume_the_same_specialist(artifact_store) -> None:
+    """Exercise the real HITL payload that used to disappear from the UI."""
+    import json
+
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.subagents import SubAgentMiddleware
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import HumanInTheLoopMiddleware
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.tools import tool
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from juena_core.clients.base import BaseAgentClient
+    from juena_core.server.streaming.processor import StreamEventProcessor
+
+    class ToolModel(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    executed = []
+
+    @tool
+    def execute(command: str, timeout: int = 600) -> str:
+        """Record a command without executing anything."""
+        executed.append((command, timeout))
+        return "ok"
+
+    specialist = create_agent(
+        model=ToolModel(responses=[
+            AIMessage(content="", tool_calls=[
+                {"name": "execute", "args": {"command": f"command-{i}", "timeout": 20 + i}, "id": f"call-{i}"}
+                for i in range(3)
+            ]),
+            AIMessage(content="specialist finished"),
+        ]),
+        tools=[execute],
+        middleware=[HumanInTheLoopMiddleware(interrupt_on={"execute": True})],
+    )
+    agent = create_agent(
+        model=ToolModel(responses=[
+            AIMessage(content="", tool_calls=[{
+                "name": "task", "id": "delegate",
+                "args": {"description": "inspect", "subagent_type": "specialist"},
+            }]),
+            AIMessage(content="final answer"),
+        ]),
+        middleware=[SubAgentMiddleware(backend=StateBackend(), subagents=[{
+            "name": "specialist", "description": "test", "runnable": specialist,
+        }])],
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "batch-approval"}}
+    processor = StreamEventProcessor(agent, config, "run-1", "inspect")
+    events = []
+    async for event in agent.astream(
+        {"messages": [HumanMessage(content="inspect")]}, config,
+        stream_mode=["updates", "messages"], subgraphs=True, version="v2",
+    ):
+        events.extend([item async for item in processor.process_event(event)])
+
+    assert executed == []
+    [card] = [item for item in events if item["type"] == "approval_required"]
+    assert [action["command"] for action in card["actions"]] == [f"command-{i}" for i in range(3)]
+    pending, kind = await first_pending_interrupt(agent, config)
+    assert kind == "execute_approval"
+    assert interrupt_event(pending) == card
+    client = BaseAgentClient(base_url="http://unused.invalid", agent="test")
+    try:
+        assert client._parse_sse_data(json.dumps(card)) == card
+    finally:
+        client.close()
+
+    command = await build_resume_command(
+        agent=agent, config=config, user_id="user-a",
+        payload=ApprovalResumeInput(
+            thread_id="batch-approval", interrupt_id=pending.id,
+            decisions=[
+                {"decision": "approve"},
+                {"decision": "edit", "edited_command": "revised"},
+                {"decision": "reject"},
+            ],
+        ),
+    )
+    result = await agent.ainvoke(command, config)
+    assert sorted(executed) == [("command-0", 20), ("revised", 21)]
+    assert result["messages"][-1].content == "final answer"
+    assert await first_pending_interrupt(agent, config) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decisions", [None, [{"decision": "approve"}]])
+async def test_batch_requires_a_decision_for_every_command(artifact_store, decisions) -> None:
+    pending = _interrupt()
+    pending.value["action_requests"] *= 2
+    pending.value["review_configs"] *= 2
+    fields = {"decision": "approve"} if decisions is None else {"decisions": decisions}
+    with pytest.raises(ResumeError, match="decision for every"):
+        await build_resume_command(
+            agent=_Agent([pending]), config={}, user_id="user-a",
+            payload=ApprovalResumeInput(thread_id="t", interrupt_id=pending.id, **fields),
         )

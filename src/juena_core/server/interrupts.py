@@ -40,6 +40,7 @@ from juena_core.server.streaming.events import clarification_required_event
 logger = get_logger(__name__)
 
 __all__ = [
+    "UNSUPPORTED_INTERRUPT",
     "ResumeError",
     "InterruptKind",
     "register_interrupt_kind",
@@ -50,6 +51,11 @@ __all__ = [
     "first_pending_interrupt",
     "build_resume_command",
 ]
+
+UNSUPPORTED_INTERRUPT = (
+    "This turn is paused for an unsupported approval or question. "
+    "It has not completed; the server cannot display the pending request."
+)
 
 
 class ResumeError(ValueError):
@@ -149,10 +155,13 @@ async def first_pending_interrupt(
     """Return the first renderable pending interrupt, including after a reload."""
 
     snapshot = await agent.aget_state(config=config)
-    for interrupt in _pending_interrupts(snapshot):
+    pending = _pending_interrupts(snapshot)
+    for interrupt in pending:
         kind = classify_interrupt(interrupt)
         if kind is not None:
             return interrupt, kind
+    if pending:
+        raise ResumeError(UNSUPPORTED_INTERRUPT)
     return None
 
 

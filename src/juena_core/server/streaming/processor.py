@@ -20,7 +20,7 @@ from langchain_core.messages import BaseMessage, RemoveMessage, SystemMessage, T
 
 from juena_core.log import get_logger
 from juena_core.server.errors import MessageProcessingError, StreamingError
-from juena_core.server.interrupts import interrupt_event
+from juena_core.server.interrupts import UNSUPPORTED_INTERRUPT, interrupt_event
 from juena_core.server.streaming import events
 from juena_core.server.streaming.handlers import (
     extract_interrupts,
@@ -164,9 +164,8 @@ class StreamEventProcessor:
                     ):
                         continue
                     payload = interrupt_event(interrupt)
-                    if payload is not None:
-                        self._streamed_interrupt_ids.add(interrupt.id)
-                        yield payload
+                    self._streamed_interrupt_ids.add(interrupt.id)
+                    yield payload if payload is not None else events.error_event(UNSUPPORTED_INTERRUPT)
                 for message in extract_update_messages(event):
                     async for payload in self._handle_message(message, from_subagent):
                         yield payload

@@ -803,3 +803,61 @@ def test_delete_thread_endpoint_reports_workspace_cleanup_failure(
     assert deleted == {}
     assert activity.reserve_run("thread-123") is True
     activity.release_run("thread-123")
+
+
+@pytest.mark.parametrize("supported", [True, False])
+@pytest.mark.parametrize("with_files", [True, False])
+def test_new_message_cannot_replace_a_paused_turn(configured, monkeypatch, supported, with_files):
+    from unittest.mock import AsyncMock
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.types import interrupt
+
+    from juena_core.server.api import endpoints as api_endpoints
+    from juena_core.server.database.connection import get_db_session
+
+    def ask(state):
+        answer = interrupt({"kind": "clarification" if supported else "unknown", "question": "Which sample?"})
+        return {"messages": [AIMessage(content=str(answer))]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("ask", ask)
+    builder.add_edge(START, "ask")
+    builder.add_edge("ask", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "paused"}}
+    graph.invoke({"messages": [HumanMessage(content="original request")]}, config)
+    before = graph.get_state(config)
+
+    monkeypatch.setattr(api_endpoints, "get_agent", AsyncMock(return_value=graph))
+    owned = AsyncMock(return_value=SimpleNamespace(thread_id="paused"))
+    monkeypatch.setattr(api_endpoints, "ensure_owned_chat", owned)
+    monkeypatch.setattr(api_endpoints, "get_owned_chat", owned)
+    stage = AsyncMock()
+    app = FastAPI()
+    app.include_router(api_endpoints.build_api_router(
+        local_principal(user_id=uuid4()), workspace=api_endpoints.ThreadWorkspace(stage=stage),
+    ))
+    app.dependency_overrides[get_db_session] = lambda: SimpleNamespace(commit=AsyncMock())
+    with TestClient(app) as client:
+        if with_files:
+            response = client.post("/test/stream_with_files", data={
+                "thread_id": "paused", "message": "continue",
+            }, files={"attachments": ("sample.txt", b"new data", "text/plain")})
+        else:
+            response = client.post("/test/stream", json={"thread_id": "paused", "message": "continue"})
+        assert '"type": "error"' in response.text
+        assert ("pending" if supported else "paused") in response.text
+        restored = client.get("/threads/paused/pending-interrupt", params={"agent_id": "test"})
+        assert restored.status_code == (200 if supported else 409)
+        if supported:
+            assert restored.json()["clarification"]["question"] == "Which sample?"
+        else:
+            assert "paused" in restored.json()["detail"]
+    stage.assert_not_called()
+    after = graph.get_state(config)
+    assert after.values == before.values
+    assert after.tasks == before.tasks

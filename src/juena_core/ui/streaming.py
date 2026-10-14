@@ -283,6 +283,9 @@ def _stream_and_display_chunks(
     received_complete_message = False
     pending_artifacts: list[dict[str, Any]] = []
     waiting_for_user = False
+    checked_threads = set(st.session_state.get("approval_checked_threads") or ())
+    checked_threads.discard(st.session_state.get("thread_id"))
+    st.session_state.approval_checked_threads = checked_threads
 
     try:
         with st.status("Thinking…", expanded=False) as status:
@@ -620,6 +623,8 @@ def _render_pending_approval(
     interrupt_id = str(approval.get("interrupt_id") or "")
     if not interrupt_id:
         return False
+    if approval.get("actions"):
+        return _render_pending_approval_batch(approval, card, custom_status)
     command = str(approval.get("command") or "")
     allowed = set(approval.get("allowed_decisions") or ("approve", "edit", "reject"))
     edit_key = f"approval_editing:{st.session_state.thread_id}:{interrupt_id}"
@@ -673,6 +678,77 @@ def _render_pending_approval(
     return True
 
 
+def _render_pending_approval_batch(
+    approval: dict[str, Any],
+    card: ApprovalCard,
+    custom_status: Mapping[str, StatusRenderer] | None,
+) -> bool:
+    """Review every command before resuming the single saved interrupt."""
+    interrupt_id = approval["interrupt_id"]
+    actions = approval["actions"]
+    decision_key = _decision_key(st.session_state.thread_id, interrupt_id)
+    submitted = st.session_state.get(decision_key)
+    decisions = []
+    labels = {"approve": "Run", "edit": "Edit", "reject": "Cancel"}
+    slot = st.empty()
+    with slot.container(border=True):
+        st.subheader(card.heading)
+        st.caption("Review each command, then submit all decisions to continue.")
+        for index, action in enumerate(actions):
+            command = str(action.get("command") or "")
+            st.write(f"Command {index + 1}")
+            st.code(command, language="bash")
+            if description := action.get("description"):
+                st.caption(description)
+            if caption := card.format_limits(action.get("limits") or {}):
+                st.caption(caption)
+            if submitted:
+                decisions.append(submitted[index])
+                st.caption(card.decision_status.get(submitted[index]["decision"], ""))
+                continue
+            choice = st.selectbox(
+                f"Decision for command {index + 1}",
+                options=action.get("allowed_decisions") or ["approve", "edit", "reject"],
+                format_func=labels.get,
+                index=None,
+                key=f"approval_choice:{st.session_state.thread_id}:{interrupt_id}:{index}",
+            )
+            decision = {"decision": choice}
+            if choice == "edit":
+                decision["edited_command"] = st.text_area(
+                    "Edited command", value=command,
+                    key=f"approval_command:{st.session_state.thread_id}:{interrupt_id}:{index}",
+                    height=140,
+                )
+            decisions.append(decision)
+        complete = all(
+            item["decision"] and (
+                item["decision"] != "edit" or item.get("edited_command", "").strip()
+            ) for item in decisions
+        )
+        submit = st.button(
+            "Submit decisions", type="primary",
+            key=f"approval_submit:{st.session_state.thread_id}:{interrupt_id}",
+            disabled=bool(submitted) or not complete,
+        )
+    if not submit or submitted or not complete:
+        return False
+
+    st.session_state[decision_key] = decisions
+    # Remove the live controls before opening a stream; a second click would
+    # otherwise rerun the page and cancel the resumed specialist.
+    with slot.container(border=True):
+        for action, decision in zip(actions, decisions):
+            st.code(decision.get("edited_command", action["command"]), language="bash")
+            st.caption(card.decision_status.get(decision["decision"], ""))
+    with st.chat_message("assistant"):
+        stream_and_display_resume(
+            approval, st.empty(), kind=card.kind,
+            custom_status=custom_status, decisions=decisions,
+        )
+    return True
+
+
 def render_pending_interrupt(
     *,
     approval: ApprovalCard | None = None,
@@ -703,6 +779,7 @@ def render_pending_interrupt(
             )
         except AgentClientError as exc:
             st.warning(f"Unable to restore what this chat was waiting for: {exc}")
+            return True
         else:
             # Cache a successful empty lookup, but let the next script run
             # retry a transient transport/server failure.
@@ -716,7 +793,9 @@ def render_pending_interrupt(
     if not isinstance(pending, dict):
         return False
     if pending.get("type") == "clarification_required":
-        return _render_pending_clarification(pending, custom_status)
+        _render_pending_clarification(pending, custom_status)
+        return True
     if pending.get("type") == "approval_required" and approval is not None:
-        return _render_pending_approval(pending, approval, custom_status)
+        _render_pending_approval(pending, approval, custom_status)
+        return True
     return False

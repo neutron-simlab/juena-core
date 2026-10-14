@@ -229,7 +229,7 @@ def test_stream_and_display_response_token_only_completion_uses_finalize_rendere
     render_streaming_token_mock = Mock()
     rerun_mock = Mock()
     message_placeholder = Mock()
-    session_state = SimpleNamespace(
+    session_state = _SessionState(
         client=_FakeTokenClient([{"type": "token", "content": "Hello"}]),
         thread_id="thread-1",
         user_id="user-1",
@@ -269,7 +269,7 @@ def test_stream_and_display_response_token_only_math_completion_keeps_raw_text(
     finalize_mock = Mock()
     render_streaming_token_mock = Mock()
     message_placeholder = Mock()
-    session_state = SimpleNamespace(
+    session_state = _SessionState(
         client=_FakeTokenClient(
             [
                 {"type": "token", "content": r"Equation: \("},
@@ -418,7 +418,7 @@ def test_pending_approval_ignores_clicks_once_a_decision_is_taken(monkeypatch) -
     monkeypatch.setattr(streaming, "st", fake_st)
     monkeypatch.setattr(streaming, "stream_and_display_resume", resume_mock)
 
-    assert streaming.render_pending_interrupt(approval=APPROVAL) is False
+    assert streaming.render_pending_interrupt(approval=APPROVAL) is True
 
     assert all(kwargs["disabled"] for _label, kwargs in calls)
     resume_mock.assert_not_called()
@@ -550,7 +550,7 @@ def test_a_question_waits_until_an_answer_is_actually_given(monkeypatch) -> None
     monkeypatch.setattr(streaming, "stream_and_display_resume", resume_mock)
 
     # Send was clicked, but the box holds only whitespace.
-    assert streaming.render_pending_interrupt() is False
+    assert streaming.render_pending_interrupt() is True
     resume_mock.assert_not_called()
 
 
@@ -599,6 +599,88 @@ def test_failed_resume_reopens_the_command_for_another_click(monkeypatch) -> Non
     assert "interrupt_decision:thread-1:interrupt-1" not in session_state
 
 
+def test_batch_approval_widgets_submit_all_choices_and_resume_once() -> None:
+    from streamlit.testing.v1 import AppTest
+
+    app = AppTest.from_string('''
+import streamlit as st
+from juena_core.schema.server import ChatMessage
+from juena_core.ui.streaming import ApprovalCard, render_pending_interrupt
+
+class Client:
+    def resume_stream(self, **fields):
+        st.session_state.sent.append(fields)
+        yield ChatMessage(type="ai", content="Finished")
+    def get_pending_interrupt(self, *args, **kwargs):
+        return None
+
+if "sent" not in st.session_state:
+    st.session_state.update(
+        client=Client(), sent=[], thread_id="t", messages=[],
+        selected_provider="openai", selected_model="test",
+        pending_approvals={"t": {
+            "type": "approval_required", "interrupt_id": "batch",
+            "actions": [{
+                "command": f"command-{i}",
+                "allowed_decisions": ["approve", "edit", "reject"],
+            } for i in range(3)],
+        }},
+    )
+if not render_pending_interrupt(approval=ApprovalCard(kind="execute_approval")):
+    st.chat_input("Your message")
+''').run()
+    assert not app.exception
+    assert [item.value for item in app.code] == ["command-0", "command-1", "command-2"]
+    assert len(app.chat_input) == 0
+    assert app.button[0].disabled
+    assert app.session_state["sent"] == []
+
+    app.selectbox[0].select("approve")
+    app.selectbox[1].select("edit")
+    app.selectbox[2].select("reject")
+    app.run()
+    app.text_area[0].input("").run()
+    assert app.button[0].disabled
+    app.text_area[0].input("revised-command").run()
+    assert not app.button[0].disabled
+    app.button[0].click().run()
+    assert not app.exception
+    [sent] = app.session_state["sent"]
+    assert sent["decisions"] == [
+        {"decision": "approve"},
+        {"decision": "edit", "edited_command": "revised-command"},
+        {"decision": "reject"},
+    ]
+    assert sent["interrupt_id"] == "batch"
+    assert len(app.chat_input) == 1
+    assert app.session_state["messages"][-1].content == "Finished"
+    app.run()
+    assert len(app.session_state["sent"]) == 1
+
+
+def test_server_error_cannot_finish_with_done(monkeypatch) -> None:
+    from juena_core.clients.base import BaseAgentClient
+
+    status = _FakeStatus()
+    state = _SessionState(
+        messages=[], thread_id="t", approval_checked_threads={"t"},
+    )
+    error = Mock()
+    monkeypatch.setattr(streaming, "st", SimpleNamespace(
+        session_state=state, error=error, status=lambda *a, **k: status,
+    ))
+
+    def chunks():
+        yield BaseAgentClient._parse_sse_data(
+            None, '{"type":"error","content":"This turn is paused"}',
+        )
+
+    streaming._stream_and_display_chunks(chunks(), Mock(), should_rerun=False)
+    assert "Done" not in status.labels
+    assert "paused" in error.call_args.args[0]
+    assert state.approval_checked_threads == set()
+
+
 # --------------------------------------------------------------------------- #
 # The status container
 # --------------------------------------------------------------------------- #
@@ -641,7 +723,7 @@ def test_stream_routes_status_chunks_away_from_response_text(monkeypatch) -> Non
     """A status event must never be accumulated into the answer."""
     status = _FakeStatus()
     finalize_mock = Mock()
-    session_state = SimpleNamespace(
+    session_state = _SessionState(
         client=_FakeTokenClient(
             [
                 {"type": "status", "phase": "researching", "label": "Researching…"},
