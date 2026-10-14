@@ -203,7 +203,7 @@ def _claim_artifact_key(artifact: dict[str, Any], filename: str) -> str | None:
 
 
 def render_artifacts(custom_data: dict[str, Any] | None) -> None:
-    """Render plots and authenticated downloads beneath the assistant response."""
+    """Render plots and records; ordinary downloads belong in a mounted explorer."""
     artifacts = (custom_data or {}).get("artifacts") or []
     if not isinstance(artifacts, list):
         return
@@ -215,6 +215,14 @@ def render_artifacts(custom_data: dict[str, Any] | None) -> None:
 
     prepared: list[tuple[dict[str, Any], str, str]] = []
     for artifact in ordered:
+        # The explorer owns ordinary files; keep plots and execution snapshots
+        # in the transcript. Apps without the explorer still need downloads.
+        if (
+            st.session_state.get("filesystem_scope")
+            and artifact.get("kind") != "image"
+            and artifact.get("category") != "record"
+        ):
+            continue
         filename = str(artifact.get("filename") or "result.txt")
         key = _claim_artifact_key(artifact, filename)
         if key is not None:
@@ -233,6 +241,8 @@ def render_artifacts(custom_data: dict[str, Any] | None) -> None:
         artifact = item[0]
         group_id = str(artifact.get("group_id") or "").strip()
         group_label = str(artifact.get("group_label") or "Artifacts").strip()
+        if artifact.get("category") == "record":
+            group_id, group_label = "__execution_records__", "Execution details"
         if not group_id and artifact.get("kind") != "image" and ungrouped_downloads > 1:
             group_id = "__ungrouped_downloads__"
             group_label = "Generated files"

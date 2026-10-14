@@ -51,5 +51,8 @@ def test_blablador_display_names_hide_provider_ranking_prefixes() -> None:
     assert all(not label[:1].isdigit() for label in labels)
 
 
-def test_blablador_default_model_remains_gpt_oss() -> None:
-    assert get_default_model_for_provider(Provider.BLABLADOR) == BlabladorModelName.GPT_OSS.value
+def test_blablador_default_model_is_juwels_qwen() -> None:
+    assert (
+        get_default_model_for_provider(Provider.BLABLADOR)
+        == BlabladorModelName.QWEN38_FLASH_NEXT_JUWELS.value
+    )

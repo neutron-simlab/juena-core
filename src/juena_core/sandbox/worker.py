@@ -89,7 +89,7 @@ class SandboxWorker:
                 )
                 expired = self.workspaces.cleanup_expired(self.jobs.active_workspaces())
                 logger.info(
-                    "Sandbox cleanup: %d stale, %d rows removed, %d workspaces removed",
+                    "Sandbox cleanup: %d stale, %d rows removed, %d scratch directories removed",
                     stale,
                     removed,
                     expired,

@@ -177,10 +177,16 @@ def build_specialist_backend(
     *,
     repo_cache_root: Path | None = None,
     skills_dir: Path | None = None,
+    workspace_writable: bool = False,
 ) -> CompositeBackend:
     """Build isolated staged-input, repository, and optional skill routes."""
 
     routes: dict[str, Any] = {FINDINGS_PREFIX: FindingsStateBackend()}
+    from juena_core.filesystem.service import get_filesystem
+    if get_filesystem() is not None:
+        from juena_core.filesystem.backend import ConversationBackend
+        routes["/workspace/"] = ConversationBackend(writable=workspace_writable)
+        routes["/inputs/"] = ConversationBackend(root="/inputs")
     if repo_cache_root is not None:
         routes["/repos/"] = ReadOnlyFilesystemBackend(
             root_dir=repo_cache_root,
@@ -193,7 +199,10 @@ def build_specialist_backend(
             virtual_mode=True,
             label="read-only skill",
         )
-    return CompositeBackend(default=ReadOnlyInputsStateBackend(), routes=routes)
+    return CompositeBackend(
+        default=ReadOnlyInputsStateBackend(), routes=routes,
+        artifacts_root="/workspace/.scratch" if get_filesystem() is not None and workspace_writable else "/",
+    )
 
 
 def resilience_middleware(

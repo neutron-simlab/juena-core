@@ -33,7 +33,10 @@ def test_model_catalogue_preserves_curated_blablador_models() -> None:
     models = get_models_for_provider(Provider.BLABLADOR)
 
     assert models == [model.value for model in BlabladorModelName]
-    assert get_default_model_for_provider(Provider.BLABLADOR) == models[0]
+    assert (
+        get_default_model_for_provider(Provider.BLABLADOR)
+        == BlabladorModelName.QWEN38_FLASH_NEXT_JUWELS.value
+    )
     assert (
         get_blablador_model_display_name(BlabladorModelName.MINIMAX_M27.value)
         == "MiniMax-M2.7"

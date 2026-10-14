@@ -146,7 +146,7 @@ def test_podman_renderer_keeps_every_isolation_control(container_kwargs) -> None
     assert rendered["resource_limits"]["pids"]["limit"] == 256
     assert rendered["resource_limits"]["memory"]["limit"] == 4 * 1024**3
     assert rendered["resource_limits"]["cpu"]["quota"] == 200_000
-    assert rendered["work_dir"] == "/workspace"
+    assert rendered["work_dir"] == "/workspace/.scratch"
     tmp = next(item for item in rendered["mounts"] if item["destination"] == "/tmp")
     assert "noexec" in tmp["options"]
 
@@ -188,6 +188,28 @@ def _with_container(executor: PodmanExecutor, container: _Container) -> None:
     )
 
 
+def test_claimed_job_waits_for_brief_api_operation_lock(tmp_path) -> None:
+    executor = _executor(tmp_path)
+    container = _Container(output=b"done")
+    _with_container(executor, container)
+    job = _job()
+    started = threading.Event()
+
+    def run():
+        started.set()
+        return executor.run(job)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with executor.workspaces.guard(job.workspace_id, operation=True):
+            future = pool.submit(run)
+            assert started.wait(timeout=1)
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.05)
+            assert not container.started
+        assert future.result(timeout=2).status == "completed"
+    assert container.removed
+
+
 def test_finished_container_is_always_removed(tmp_path) -> None:
     executor = _executor(tmp_path)
     job = _job()
@@ -206,7 +228,7 @@ def test_worker_reports_every_kind_of_filtered_output(tmp_path, monkeypatch) -> 
     executor = _executor(tmp_path)
     job = _job()
     output_dir = executor.workspaces.workspace_dir(job.workspace_id) / "outputs"
-    monkeypatch.setattr("juena_core.sandbox.workspace.MAX_FILE_ARTIFACT_BYTES", 4)
+    monkeypatch.setattr("juena_core.filesystem.storage.MAX_FILE_ARTIFACT_BYTES", 4)
 
     class ArtifactContainer(_Container):
         def start(self) -> None:

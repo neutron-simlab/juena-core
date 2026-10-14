@@ -60,7 +60,7 @@ __all__ = [
 ]
 
 #: Every ``st.session_state`` name this module touches. The page owns the first
-#: five and merely shares them; the last two are this module's own bookkeeping.
+#: five and merely shares them; the remainder are this module's bookkeeping.
 SESSION_KEYS = (
     "client",
     "thread_id",
@@ -69,6 +69,7 @@ SESSION_KEYS = (
     "selected_provider",
     "pending_approvals",
     "approval_checked_threads",
+    "filesystem_refresh",
 )
 
 StatusRenderer = Callable[[Any, dict[str, Any]], None]
@@ -352,6 +353,9 @@ def _stream_and_display_chunks(
                 else:
                     finalize_streaming_message(message_placeholder, last_msg.content)
 
+        refresh = st.session_state.setdefault("filesystem_refresh", {})
+        thread_id = st.session_state.get("thread_id")
+        refresh[thread_id] = refresh.get(thread_id, 0) + 1
         if should_rerun:
             st.rerun()
 

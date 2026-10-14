@@ -102,6 +102,8 @@ class _StoredArtifact:
     height: int | None
     caption: str
     created_at: str
+    category: ArtifactCategory = "result"
+    workspace_path: str | None = None
     group_id: str | None = None
     group_label: str | None = None
 
@@ -116,13 +118,15 @@ class _StoredArtifact:
             height=self.height,
             caption=self.caption,
             created_at=datetime.fromisoformat(self.created_at),
+            category=self.category,
+            workspace_path=self.workspace_path,
             group_id=self.group_id,
             group_label=self.group_label,
         )
 
 
 def undelivered_note(dropped: list[tuple[str, str]]) -> str:
-    """The block telling the model a file exists but the user cannot see it.
+    """The block telling the model a file was not delivered as a chat artifact.
 
     Shared so a file refused during a command and one refused during a write
     are described to the model in the same words.
@@ -131,8 +135,8 @@ def undelivered_note(dropped: list[tuple[str, str]]) -> str:
     return (
         "Files written to /workspace/outputs but NOT delivered to the user:\n"
         + lines
-        + "\nThe user cannot see these files. No file path, URL, or sandbox: link "
-        "will show them. Do not write a Markdown image or a path for them. Say in "
+        + "\nThese files were not attached in chat. Do not invent a download URL, "
+        "sandbox: link, or Markdown image. Say in "
         "your report that they could not be delivered, give the reason above, and "
         "offer to produce them again in a new message."
     )
@@ -275,6 +279,7 @@ class ArtifactStore:
         content: bytes,
         caption: str | None = None,
         category: ArtifactCategory = "result",
+        workspace_path: str | None = None,
         group_id: str | None = None,
         group_label: str | None = None,
     ) -> ArtifactRef:
@@ -288,6 +293,8 @@ class ArtifactStore:
             thread_id=thread_id,
             run_id=run_id,
             filename=safe_filename,
+            category=category,
+            workspace_path=workspace_path,
             mime_type=mime_type,
             kind=kind,
             size=len(content),

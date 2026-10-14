@@ -96,6 +96,6 @@ def get_default_model_for_provider(provider: Provider) -> str:
 
     defaults = {
         Provider.OPENAI: OpenAIModelName.GPT_4O_MINI.value,
-        Provider.BLABLADOR: BlabladorModelName.GPT_OSS.value,
+        Provider.BLABLADOR: BlabladorModelName.QWEN38_FLASH_NEXT_JUWELS.value,
     }
     return defaults.get(provider, "")

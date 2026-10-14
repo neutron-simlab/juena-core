@@ -87,10 +87,17 @@ the resulting image digest.
 | Streamlit shell | `juena_core.ui` | Pages, navigation, branding and session policy |
 | MCP discovery | `juena_core.mcp` | Server configuration and tool security facade |
 | Isolated execution | `juena_core.sandbox` | Opt-in settings, worker deployment and sandbox image |
+| Shared conversation files | `juena_core.filesystem`, `juena_core.ui.filesystem` | Storage root, identity, navigation and optional execution activity lookup |
 | Shared contracts | `juena_core.schema`, `juena_core.artifacts` | Domain schemas and artifact producers |
 
 Applications can use the client or schemas without running the server, and
 can use the server without installing the UI or MCP extras.
+
+## Shared conversation filesystem
+
+The optional file browser lets users browse, preview, and edit the same files
+available to their agent. It supports conversation-specific workspaces and works
+without enabling code execution.
 
 ## Application wiring
 

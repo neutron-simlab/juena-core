@@ -246,7 +246,7 @@ def test_runtime_backend_routes_only_explicit_read_only_prefixes(monkeypatch, tm
 
     assert isinstance(composite, BackendProtocol)
     assert not callable(composite)
-    assert composite.artifacts_root == "/workspace"
+    assert composite.artifacts_root == "/workspace/.scratch"
 
     try:
         middleware = FilesystemMiddleware(backend=composite)
@@ -256,8 +256,8 @@ def test_runtime_backend_routes_only_explicit_read_only_prefixes(monkeypatch, tm
         assert resolved is composite
         assert supports_execution(composite)
         assert isinstance(composite.default, RuntimePodmanSandboxBackend)
-        assert composite.artifacts_root == "/workspace"
-        assert middleware._large_tool_results_prefix == "/workspace/large_tool_results"
+        assert composite.artifacts_root == "/workspace/.scratch"
+        assert middleware._large_tool_results_prefix == "/workspace/.scratch/large_tool_results"
         first_workspace = workspace_id_for("user-a", "thread-a", "t" * 32)
         assert composite.default.id == first_workspace
 

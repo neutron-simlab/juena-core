@@ -80,7 +80,7 @@ SUPERVISOR_FILESYSTEM_TOOL_DESCRIPTIONS = {
     "ls": (
         "List `/findings/` to see what your specialists have established on this "
         "conversation, or `/memories/` for saved preferences. Nothing else is "
-        "visible to you: staged inputs and repository files belong to specialists."
+        "available for content inspection: `/workspace` can be listed to direct specialists."
     ),
     "read_file": (
         "Read a `/findings/<topic>.md` a specialist reported, to weigh its "
@@ -93,7 +93,7 @@ SUPERVISOR_FILESYSTEM_TOOL_DESCRIPTIONS = {
         "Search `/findings/` for a term across everything your specialists have "
         "established, or `/memories/` for an exact saved preference."
     ),
-    "glob": "Find files under `/findings/` or `/memories/`; nothing else is visible.",
+    "glob": "Find filenames under `/workspace`, `/findings/`, or `/memories/`; delegate workspace content inspection.",
     "write_file": (
         "Create `/memories/AGENTS.md` only when the user explicitly asks you to "
         "remember something. `/findings/` is written by specialists, never by you."
@@ -351,9 +351,14 @@ def user_store_namespace(runtime: Any) -> tuple[str, str]:
 def build_supervisor_backend(store: Any) -> CompositeBackend:
     """Expose per-user memory while retaining the shared staged-files state channel."""
 
+    from juena_core.filesystem.service import get_filesystem
+    from juena_core.filesystem.backend import ConversationBackend
+
     return CompositeBackend(
         default=SupervisorStateBackend(),
         routes={
+            **({"/workspace/": ConversationBackend(directories_only=True)}
+               if get_filesystem() is not None else {}),
             "/memories/": StoreBackend(
                 store=store,
                 namespace=user_store_namespace,

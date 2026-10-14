@@ -113,8 +113,8 @@ def _artifact_rejection_note(scan: WorkspaceArtifactScan) -> str:
     return (
         "Files written to /workspace/outputs but NOT delivered to the user:\n"
         + "\n".join(lines)
-        + "\nThe user cannot see these files. Do not retry them, claim they were "
-        "attached, or provide a file path, URL, sandbox: link, or Markdown image. "
+        + "\nThese files were not attached in chat. Do not retry them or claim "
+        "they were attached. Do not invent a download URL, sandbox: link, or Markdown image. "
         "Report the limitation and its reason."
     )
 
@@ -193,7 +193,7 @@ class PodmanExecutor:
             "cpu_period": CPU_PERIOD_MICROSECONDS,
             "cpu_quota": int(float(self.settings.cpu_limit) * CPU_PERIOD_MICROSECONDS),
             "ulimits": [{"Name": "fsize", "Soft": limit, "Hard": limit}],
-            "working_dir": "/workspace",
+            "working_dir": "/workspace/.scratch",
             "environment": {
                 "HOME": "/tmp",
                 "MPLCONFIGDIR": "/tmp/matplotlib",
@@ -262,6 +262,18 @@ class PodmanExecutor:
         return bytes(buffer), truncated
 
     def run(self, job: SandboxJobRecord) -> ExecutionOutcome:
+        with (
+            self.workspaces.guard(job.workspace_id, operation=True, shared=True, blocking=True),
+            self.workspaces.guard(job.workspace_id, execution=True, blocking=True),
+        ):
+            self.workspaces.invalidate_usage(job.workspace_id)
+            try:
+                return self._run_locked(job)
+            finally:
+                # Commands can create, rename or delete arbitrary workspace files.
+                self.workspaces.invalidate_usage(job.workspace_id)
+
+    def _run_locked(self, job: SandboxJobRecord) -> ExecutionOutcome:
         """Run one claimed job to completion. The container never outlives it."""
 
         self.workspaces.ensure(job.workspace_id, job.tenant_id)

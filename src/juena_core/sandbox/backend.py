@@ -187,6 +187,7 @@ class PodmanSandboxBackend(BaseSandbox):
                             run_id=self._run_id,
                             filename=name,
                             content=artifact.content,
+                            workspace_path=artifact.path,
                         )
                     )
                 except (OSError, ValueError) as exc:

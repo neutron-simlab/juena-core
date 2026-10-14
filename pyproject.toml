@@ -66,3 +66,7 @@ testpaths = ["tests"]
 filterwarnings = [
     "error::langchain_core._api.deprecation.LangChainDeprecationWarning",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/juena_core"]
+artifacts = ["src/juena_core/ui/filesystem_dist/*"]

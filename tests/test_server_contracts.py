@@ -861,3 +861,23 @@ def test_new_message_cannot_replace_a_paused_turn(configured, monkeypatch, suppo
     after = graph.get_state(config)
     assert after.values == before.values
     assert after.tasks == before.tasks
+
+
+@pytest.mark.parametrize("origin", ["*", "https://*.example", "https://example/path", "null"])
+def test_browser_cors_rejects_nonexplicit_origins(local, origin):
+    with pytest.raises(ValueError, match="explicit HTTP origins"):
+        create_app(principal=local, browser_origins=(origin,))
+
+
+def test_browser_cors_allows_only_configured_credentialed_origin(local):
+    from fastapi.testclient import TestClient
+    client = TestClient(create_app(principal=local, browser_origins=("http://localhost:9501",)))
+    headers = {"Origin": "http://localhost:9501", "Access-Control-Request-Method": "PUT",
+               "Access-Control-Request-Headers": "content-type"}
+    response = client.options("/threads/test/filesystem/file", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:9501"
+    assert response.headers["access-control-allow-credentials"] == "true"
+    response = client.options("/threads/test/filesystem/file", headers={**headers, "Origin": "https://evil.example"})
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers

@@ -101,7 +101,7 @@ def user_id() -> UUID:
 
 
 @pytest.fixture
-def client(monkeypatch, user_id):
+def client(monkeypatch, user_id, request, tmp_path):
     """A running application, with the schema rebuilt from nothing."""
 
     monkeypatch.setattr(config_module, "_settings", make_settings())
@@ -111,7 +111,14 @@ def client(monkeypatch, user_id):
     registry_module.register_agent_factory(SIMULATOR, _agent_factory, set_as_default=True)
     registry_module.register_agent_factory(ADVANCED, _agent_factory)
 
-    app = create_app(principal=local_principal(user_id=user_id), title="test-app")
+    filesystem = None
+    if getattr(request, "param", False):
+        from juena_core.filesystem import service
+        from juena_core.filesystem.storage import WorkspaceStore
+        filesystem = service.ConversationFilesystem(WorkspaceStore(tmp_path / "workspaces"), identity_secret="postgres-tests-identity-secret-32-characters")
+        monkeypatch.setattr(service, "_filesystem", filesystem)
+        registry_module.register_agent_factory(SIMULATOR, _filesystem_agent_factory, set_as_default=True)
+    app = create_app(principal=local_principal(user_id=user_id), title="test-app", filesystem=filesystem)
     with TestClient(app) as running:
         yield running
 
@@ -136,6 +143,87 @@ def _create_chat(client: TestClient, agent_id: str) -> str:
     response = client.post("/chats", json={"agent_id": agent_id, "title": "T"})
     assert response.status_code == 201, response.text
     return response.json()["thread_id"]
+
+
+async def _filesystem_agent_factory(provider: str, model: str):
+    from langgraph.types import interrupt
+    from juena_core.agents.specialist_runtime import build_specialist_backend
+    from juena_core.server.agent.runtime_model_middleware import RuntimeModelContext
+
+    class State(TypedDict):
+        messages: list
+        files: dict
+
+    backend = build_specialist_backend(workspace_writable=True)
+
+    async def observe(state):
+        if "cancel" in state["messages"][-1].content:
+            import asyncio
+            await asyncio.sleep(60)
+        if "pause" in state["messages"][-1].content:
+            interrupt({"kind": "clarification", "question": "Continue?"})
+        read = await backend.aread("/workspace/uploads/code.py")
+        assert read.error is None, read.error
+        # A nested working file appears without registration as a chat artifact.
+        await backend.awrite("/workspace/nested/observed.py", read.file_data["content"])
+        return {"files": {**state["files"], "/findings/committed.md": {
+            "content": "Specialist observation", "created_at": "2026-10-14", "modified_at": "2026-10-14",
+        }}}
+
+    graph = StateGraph(State, context_schema=RuntimeModelContext)
+    graph.add_node("observe", observe)
+    graph.add_edge(START, "observe")
+    graph.add_edge("observe", END)
+    return object(), graph.compile(checkpointer=get_checkpointer())
+
+
+@pytest.mark.parametrize("client", [True], indirect=True)
+def test_shared_files_through_real_stream_checkpoint_and_deletion(client, user_id):
+    from juena_core.filesystem import get_filesystem
+    from juena_core.filesystem.storage import WorkspaceOwnershipError
+    thread_id = _create_chat(client, SIMULATOR)
+    base = f"/threads/{thread_id}/filesystem"
+    content = b"\xef\xbb\xbfvalue = 42\r\n"
+    response = client.post(f"/{SIMULATOR}/stream_with_files", data={
+        "thread_id": thread_id, "message": "Inspect this file",
+    }, files=[("attachments", ("code.py", content, "text/plain"))])
+    assert response.status_code == 200, response.text
+    assert '"type": "error"' not in response.text, response.text
+    assert client.get(base + "/download", params={"path": "/workspace/nested/observed.py"}).content == content.replace(b"\r\n", b"\n")
+    preview = client.get(base + "/file", params={"path": "/workspace/uploads/code.py"}).json()
+    assert preview["editable"] is True
+    payload = {"path": preview["path"], "revision": preview["revision"], "text": "value = 99\n"}
+    assert client.put(base + "/file", json=payload).status_code == 200
+    assert client.put(base + "/file", json=payload).status_code == 409
+    assert client.get(base + "/file", params={"path": "/findings/committed.md"}).json()["editable"] is False
+    fs = get_filesystem()
+    files = fs.for_thread(str(user_id), thread_id)
+    with files.guard(operation=True, shared=True):
+        assert client.delete(f"/threads/{thread_id}").status_code == 409
+    fs.active_workspaces = lambda: {files.workspace_id}
+    assert client.delete(f"/threads/{thread_id}").status_code == 409
+    fs.active_workspaces = set
+    assert client.delete(f"/threads/{thread_id}").status_code == 200
+    assert client.get(base).status_code == 404
+    with pytest.raises(WorkspaceOwnershipError):
+        files.ensure()
+
+
+@pytest.mark.parametrize("client", [True], indirect=True)
+def test_checkpointed_interrupt_blocks_edits_after_stream_returns(client, user_id):
+    from juena_core.filesystem import get_filesystem
+    thread_id = _create_chat(client, SIMULATOR)
+    files = get_filesystem().for_thread(str(user_id), thread_id)
+    files.ensure()
+    path = files.add_upload("code.py", b"original")
+    response = client.post(f"/{SIMULATOR}/stream", json={"thread_id": thread_id, "message": "pause"})
+    assert response.status_code == 200, response.text
+    assert "clarification_required" in response.text
+    result = client.put(f"/threads/{thread_id}/filesystem/file", json={
+        "path": path, "text": "changed", "revision": files.preview(path, {})["revision"],
+    })
+    assert result.status_code == 409, result.text
+    assert files.store.paused(files.workspace_id)
 
 
 # --------------------------------------------------------------------------
@@ -330,3 +418,99 @@ def test_the_workspace_hook_runs_on_delete(monkeypatch, user_id) -> None:
 
 def test_an_unknown_artifact_is_not_found(client) -> None:
     assert client.get(f"/artifacts/{uuid4()}").status_code == 404
+
+
+@pytest.mark.parametrize("client", [True], indirect=True)
+def test_deleted_conversation_identity_is_refused_by_create_and_stream(client, user_id):
+    thread_id = _create_chat(client, SIMULATOR)
+    assert client.delete(f"/threads/{thread_id}").status_code == 200
+    assert client.get(f"/chats/{thread_id}").status_code == 410
+    response = client.post("/chats", json={"thread_id": thread_id, "agent_id": SIMULATOR, "title": "stale tab"})
+    assert response.status_code == 410, response.text
+    response = client.post(f"/{SIMULATOR}/stream", json={"thread_id": thread_id, "message": "stale tab"})
+    assert response.status_code == 410, response.text
+    assert response.json()["detail"]["code"] == "conversation_deleted"
+    assert all(chat["thread_id"] != thread_id for chat in client.get("/chats").json())
+    assert _create_chat(client, SIMULATOR) != thread_id
+
+
+@pytest.mark.parametrize("client", [True], indirect=True)
+def test_begin_turn_waits_for_short_file_panel_operation(client, user_id):
+    from concurrent.futures import ThreadPoolExecutor
+    from time import sleep
+    from juena_core.filesystem import get_filesystem
+    thread_id = _create_chat(client, SIMULATOR)
+    files = get_filesystem().for_thread(str(user_id), thread_id)
+    files.ensure()
+    files.add_upload("code.py", b"print(1)")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with files.guard():
+            response = pool.submit(client.post, f"/{SIMULATOR}/stream", json={"thread_id": thread_id, "message": "Inspect"})
+            sleep(0.1)
+            assert not response.done()
+        result = response.result(timeout=10)
+    assert result.status_code == 200
+    assert '"type": "error"' not in result.text, result.text
+
+
+@pytest.mark.parametrize("client", [True], indirect=True)
+@pytest.mark.parametrize("during_send", [False, True])
+def test_cancelled_stream_releases_operation_and_does_not_pin_scratch(client, user_id, during_send):
+    import asyncio
+    import json
+    import os
+    from juena_core.filesystem import get_filesystem
+    thread_id = _create_chat(client, SIMULATOR)
+    files = get_filesystem().for_thread(str(user_id), thread_id)
+    files.ensure()
+    files.path("/workspace/.scratch/temp.py").write_text("temporary")
+    body = json.dumps({"thread_id": thread_id, "message": "cancel this response"}).encode()
+
+    async def disconnect():
+        received = False
+        first, left = asyncio.Event(), asyncio.Event()
+        async def receive():
+            nonlocal received
+            if not received:
+                received = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            await left.wait()
+            return {"type": "http.disconnect"}
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                first.set()
+                if during_send:
+                    await asyncio.Event().wait()
+        scope = {"type": "http", "http_version": "1.1", "method": "POST",
+                 "scheme": "http", "path": f"/{SIMULATOR}/stream", "root_path": "",
+                 "query_string": b"", "headers": [(b"content-type", b"application/json")],
+                 "server": ("localhost", 80), "client": ("127.0.0.1", 1)}
+        serving = asyncio.create_task(client.app(scope, receive, send))
+        await asyncio.wait_for(first.wait(), 5)
+        await asyncio.sleep(0.1)
+        left.set()
+        await asyncio.wait_for(serving, 5)
+    client.portal.call(disconnect)
+    assert not files.store.paused(files.workspace_id)
+    with files.guard(operation=True):
+        pass
+    os.utime(files.store.workspace_root(files.workspace_id), (1, 1))
+    assert files.store.cleanup_expired(set()) == 1
+
+
+@pytest.mark.parametrize("client", [True], indirect=True)
+def test_create_waits_for_deletion_then_rechecks_tombstone(client, user_id):
+    from concurrent.futures import ThreadPoolExecutor
+    from time import sleep
+    from juena_core.filesystem import get_filesystem
+    thread_id = str(uuid4())
+    files = get_filesystem().for_thread(str(user_id), thread_id)
+    files.ensure()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with files.guard(operation=True):
+            create = pool.submit(client.post, "/chats", json={"thread_id": thread_id, "agent_id": SIMULATOR})
+            sleep(0.1)
+            assert not create.done()
+            files.store.delete(files.workspace_id, files.tenant_id)
+        assert create.result(timeout=5).status_code == 410
+    assert all(chat["thread_id"] != thread_id for chat in client.get("/chats").json())

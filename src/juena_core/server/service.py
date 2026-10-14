@@ -46,6 +46,8 @@ from typing import Any
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
 
+from juena_core.filesystem.service import ConversationFilesystem
+from juena_core.filesystem.api import build_filesystem_router
 from juena_core.log import get_logger
 from juena_core.schema.interrupts import ClarificationResumeInput
 from juena_core.schema.server import HealthStatus
@@ -85,6 +87,8 @@ def create_app(
     principal: PrincipalDependency,
     resume_input: type[BaseModel] = ClarificationResumeInput,
     workspace: ThreadWorkspace | None = None,
+    filesystem: ConversationFilesystem | None = None,
+    browser_origins: Sequence[str] = (),
     thread_activity: ThreadActivity | None = None,
     stream_policy: StreamPolicy | None = None,
     closing_note: str = DEFAULT_CLOSING_NOTE,
@@ -101,6 +105,9 @@ def create_app(
             A real provider's, or :func:`~juena_core.server.identity.local_principal`.
         resume_input: The application's discriminated resume union.
         workspace: Where a thread's staged files are materialised, if anywhere.
+        filesystem: Shared persistent conversation files, independent of execution.
+        browser_origins: Explicit public UI/API origins allowed credentialed file
+            requests and browser saves. Use the shared public origin in production.
         thread_activity: Guard shared with application routes that write thread data.
         stream_policy: Custom stream event types and silent tools.
         closing_note: Last paragraph of a staged-input manifest.
@@ -140,6 +147,8 @@ def create_app(
                 await ensure_principal_row(configured_principal)
             try:
                 async with AsyncExitStack() as stack:
+                    if filesystem is not None:
+                        await stack.enter_async_context(filesystem.lifespan())
                     for extra in extra_lifespans:
                         await stack.enter_async_context(extra())
                     yield
@@ -165,18 +174,33 @@ def create_app(
         openapi_url=None,
     )
 
-    app.include_router(build_chat_router(principal))
+    if browser_origins:
+        from urllib.parse import urlsplit
+        from fastapi.middleware.cors import CORSMiddleware
+
+        for origin in browser_origins:
+            parsed = urlsplit(origin)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc or "*" in origin or parsed.path or parsed.query or parsed.fragment or parsed.username:
+                raise ValueError("browser_origins must contain explicit HTTP origins")
+        app.add_middleware(CORSMiddleware, allow_origins=list(browser_origins),
+                           allow_credentials=True, allow_methods=["GET", "PUT"],
+                           allow_headers=["Content-Type"])
+
+    app.include_router(build_chat_router(principal, filesystem=filesystem))
     app.include_router(
         build_api_router(
             principal,
             resume_input=resume_input,
             workspace=workspace,
+            filesystem=filesystem,
             thread_activity=thread_activity,
             stream_policy=stream_policy,
             closing_note=closing_note,
             allowed_suffixes=allowed_suffixes,
         )
     )
+    if filesystem is not None:
+        app.include_router(build_filesystem_router(principal, filesystem, browser_origins=tuple(browser_origins)))
     for router in extra_routers:
         app.include_router(router)
 

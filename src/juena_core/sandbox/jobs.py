@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,6 +16,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from juena_core.sandbox.constants import ACTIVE_STATUSES, TERMINAL_STATUSES, JobStatus
+from juena_core.filesystem.storage import tenant_id_for, workspace_id_for
 
 __all__ = [
     "CLAIM_DEADLINE_SECONDS",
@@ -55,17 +55,6 @@ def database_url(url: str) -> str:
         if url.startswith(prefix):
             return f"postgresql://{url.removeprefix(prefix)}"
     raise ValueError("DATABASE_URL must use postgres:// or postgresql://")
-
-
-def tenant_id_for(user_id: str, secret: str) -> str:
-    return hmac.new(
-        secret.encode("utf-8"), user_id.encode("utf-8"), hashlib.sha256
-    ).hexdigest()
-
-
-def workspace_id_for(user_id: str, thread_id: str, secret: str) -> str:
-    payload = f"{user_id}\0{thread_id}".encode()
-    return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
 
 def _workspace_lock_key(workspace_id: str) -> int:

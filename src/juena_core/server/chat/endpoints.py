@@ -10,14 +10,19 @@ dependency is then visible in each route's signature instead of hidden in a
 dictionary mutation at startup.
 """
 
+from contextlib import nullcontext
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from juena_core.filesystem.service import ConversationFilesystem
+from juena_core.filesystem.storage import WorkspaceBusy
 from juena_core.schema.server import CreateChatInput, UpdateChatInput
 from juena_core.server.chat.repository import (
     ChatNotFoundError,
+    ChatDeletedError,
     chat_to_dict,
     ensure_owned_chat,
     get_owned_chat,
@@ -30,7 +35,7 @@ from juena_core.server.identity import Principal, PrincipalDependency
 __all__ = ["build_chat_router"]
 
 
-def build_chat_router(principal: PrincipalDependency) -> APIRouter:
+def build_chat_router(principal: PrincipalDependency, *, filesystem: ConversationFilesystem | None = None) -> APIRouter:
     """Build the ``/chats`` router against one application's identity provider."""
 
     router = APIRouter(prefix="/chats", tags=["chats"])
@@ -58,13 +63,21 @@ def build_chat_router(principal: PrincipalDependency) -> APIRouter:
         user: Principal = Depends(principal),
         session: AsyncSession = Depends(get_db_session),
     ) -> dict:
+        thread_id = payload.thread_id or str(uuid4())
+        lease = (filesystem.for_thread(str(user.id), thread_id).aguard(operation=True, shared=True)
+                 if filesystem is not None else nullcontext())
         try:
-            chat = await ensure_owned_chat(session, user.id, payload.thread_id, payload.agent_id)
+            async with lease:
+                chat = await ensure_owned_chat(session, user.id, thread_id, payload.agent_id, filesystem=filesystem)
+                chat.title = payload.title.strip() or "New Chat"
+                await session.commit()
+                return chat_to_dict(chat)
+        except ChatDeletedError as exc:
+            raise HTTPException(410, {"code": "conversation_deleted", "message": "This conversation was deleted. Start a new chat."}) from exc
         except ChatNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Chat not found") from exc
-        chat.title = payload.title.strip() or "New Chat"
-        await session.commit()
-        return chat_to_dict(chat)
+        except WorkspaceBusy as exc:
+            raise HTTPException(409, {"code": "workspace_busy", "message": str(exc)}) from exc
 
     @router.get("/{thread_id}")
     async def get_chat(
@@ -82,6 +95,11 @@ def build_chat_router(principal: PrincipalDependency) -> APIRouter:
         the caller owns is safe under any agent, and the response says which
         agent it belongs to.
         """
+
+        if filesystem is not None:
+            files = filesystem.for_thread(str(user.id), thread_id)
+            if files.store.deleted(files.workspace_id):
+                raise HTTPException(410, {"code": "conversation_deleted", "message": "This conversation was deleted. Start a new chat."})
 
         try:
             chat = await get_owned_chat(session, user.id, thread_id, agent_id=None)
