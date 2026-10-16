@@ -78,6 +78,26 @@ def test_nested_agent_file_is_visible_without_artifact_registration(files, monke
     ]
 
 
+def test_rewritten_output_is_delivered_once_with_its_latest_content(files, monkeypatch, tmp_path):
+    """Fix iterations used to deliver every version of the same output file."""
+    from juena_core.artifacts import ArtifactStore, set_artifact_store_for_tests
+
+    store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
+    set_artifact_store_for_tests(store)
+    backend = runtime_backend(monkeypatch)
+    try:
+        assert backend.write("/outputs/select_rows.py", "version = 1\n").error is None
+        assert backend.edit("/outputs/select_rows.py", "version = 1", "version = 2").error is None
+        assert backend.edit("/outputs/select_rows.py", "version = 2", "version = 3").error is None
+        refs = store.peek_result_refs("alice", "conversation")
+        latest = store.get("alice", refs[0].artifact_id)
+    finally:
+        set_artifact_store_for_tests(None)
+
+    assert [ref.filename for ref in refs] == ["select_rows.py"]
+    assert latest[1] == b"version = 3\n"
+
+
 def test_research_is_read_only_and_supervisor_can_only_discover(files, monkeypatch):
     files.add_upload("script.py", b"print(1)")
     research = runtime_backend(monkeypatch, writable=False)

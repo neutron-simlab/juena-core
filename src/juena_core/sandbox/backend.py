@@ -320,6 +320,7 @@ class PodmanSandboxBackend(BaseSandbox):
                     run_id=self._run_id,
                     filename=PurePosixPath(path).name,
                     content=content,
+                    workspace_path=path,
                 )
             except (ValueError, OSError) as exc:
                 # Not reported through FileUploadResponse.error: the write itself

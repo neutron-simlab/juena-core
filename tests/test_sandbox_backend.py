@@ -175,6 +175,29 @@ def test_dropped_plot_is_reported_to_the_model(tmp_path) -> None:
     assert "Artifacts collected automatically" not in result.output
 
 
+def test_rerunning_a_plot_delivers_only_the_latest_version(tmp_path) -> None:
+    """Each rerun rewrites outputs/plot.png; the user should get one plot.
+
+    Before, every version counted against the per-turn plot budget, so a ninth
+    run could no longer deliver its plot at all.
+    """
+    store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
+    set_artifact_store_for_tests(store)
+    backend = _plot_backend(tmp_path)
+    try:
+        results = [backend.execute("python fit.py") for _ in range(MAX_IMAGE_ARTIFACTS_PER_TURN + 1)]
+        refs = store.peek_result_refs("user-a", "thread-a")
+        claimed = store.claim_for_message("user-a", "thread-a")
+    finally:
+        set_artifact_store_for_tests(None)
+
+    assert all("NOT delivered" not in result.output for result in results)
+    assert [ref.filename for ref in refs] == ["plot.png"]
+    assert [item["filename"] for item in claimed] == ["plot.png"]
+    # The delivered version is the one the last run reported.
+    assert refs[0].artifact_id in results[-1].output
+
+
 def test_busy_workspace_reports_the_missing_file(tmp_path) -> None:
     """_collect returns nothing when the guard is busy, which used to be silent."""
 

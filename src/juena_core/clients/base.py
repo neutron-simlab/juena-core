@@ -426,6 +426,8 @@ class BaseAgentClient:
                 "caption": parsed.get("caption", "Plot"),
                 "created_at": parsed.get("created_at"),
                 "content_base64": parsed.get("content_base64", ""),
+                # Lets the UI keep only the newest version of a rewritten file.
+                "workspace_path": parsed.get("workspace_path"),
             }
 
         # An application's own event. Handed over whole: core cannot render it,

@@ -116,6 +116,25 @@ def _session_list(key: str) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _newest_per_workspace_file(items: list[Any]) -> list[Any]:
+    """Keep only the latest live artifact for each workspace file.
+
+    A file rewritten during one answer streams one artifact event per version.
+    Events arrive in registration order, so the last one per path is current;
+    events without a workspace path are kept as they are.
+    """
+    def path_of(item: Any) -> str | None:
+        return (item.get("workspace_path") or None) if isinstance(item, dict) else None
+
+    last_index = {path_of(item): index for index, item in enumerate(items)}
+    kept = []
+    for index, item in enumerate(items):
+        path = path_of(item)
+        if path is None or last_index[path] == index:
+            kept.append(item)
+    return kept
+
+
 def _replace_message_by_id(messages: list[Any], chunk: ChatMessage) -> bool:
     """Overwrite an already-held message carrying the same id as *chunk*.
 
@@ -165,7 +184,7 @@ def process_stream_chunk(
             }
             live_by_id = {
                 item.get("artifact_id"): item
-                for item in pending_artifacts
+                for item in _newest_per_workspace_file(pending_artifacts)
                 if isinstance(item, dict) and item.get("artifact_id")
             }
             # Stored metadata is authoritative and keeps its order, while a
@@ -326,7 +345,11 @@ def _stream_and_display_chunks(
                 status.update(label="Done", state="complete", expanded=False)
 
         if response_text and not received_complete_message:
-            custom_data = {"artifacts": pending_artifacts} if pending_artifacts else {}
+            custom_data = (
+                {"artifacts": _newest_per_workspace_file(pending_artifacts)}
+                if pending_artifacts
+                else {}
+            )
             if custom_data:
                 finalize_streaming_message(message_placeholder, response_text, custom_data)
             else:

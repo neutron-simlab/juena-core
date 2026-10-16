@@ -147,6 +147,46 @@ def test_process_stream_chunk_ai_message_uses_finalize_renderer(monkeypatch) -> 
     message_placeholder.markdown.assert_not_called()
 
 
+def test_a_rewritten_plot_is_shown_once_in_its_latest_version(monkeypatch, tmp_path) -> None:
+    """Each rewrite streams its own live event; only the newest should be drawn."""
+    import io
+    import json
+
+    from PIL import Image
+
+    from juena_core.artifacts import ArtifactStore
+    from juena_core.clients.base import BaseAgentClient
+
+    def png(color: str) -> bytes:
+        buffer = io.BytesIO()
+        Image.new("RGB", (12, 8), color).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
+    pending: list[dict] = []
+    for color in ("white", "black"):
+        store.register_artifact(
+            user_id="u", thread_id="t", run_id=None, filename="plot.png",
+            content=png(color), workspace_path="/workspace/outputs/plot.png",
+        )
+        # Drained between rewrites, as the live stream does.
+        for event in store.drain_events("u", "t"):
+            pending.append(BaseAgentClient._parse_sse_data(None, json.dumps(event)))
+    stored = store.claim_for_message("u", "t")
+    chunk = ChatMessage(type="ai", content="done", custom_data={"artifacts": stored})
+    monkeypatch.setattr(streaming, "finalize_streaming_message", Mock())
+
+    streaming.process_stream_chunk(
+        chunk=chunk, client=Mock(), response_text="", received_complete_message=False,
+        message_placeholder=Mock(), messages=[], pending_artifacts=pending,
+    )
+
+    shown = chunk.custom_data["artifacts"]
+    assert len(pending) == 0
+    assert [item["artifact_id"] for item in shown] == [stored[0]["artifact_id"]]
+    assert len(stored) == 1
+
+
 def test_process_stream_chunk_replaces_a_replayed_message(monkeypatch) -> None:
     """Resuming an interrupt replays messages the transcript already holds."""
     monkeypatch.setattr(streaming, "finalize_streaming_message", Mock())
