@@ -146,13 +146,10 @@ def _create_chat(client: TestClient, agent_id: str) -> str:
 
 
 async def _filesystem_agent_factory(provider: str, model: str):
+    from deepagents.middleware.filesystem import FilesystemState
     from langgraph.types import interrupt
     from juena_core.agents.specialist_runtime import build_specialist_backend
     from juena_core.server.agent.runtime_model_middleware import RuntimeModelContext
-
-    class State(TypedDict):
-        messages: list
-        files: dict
 
     backend = build_specialist_backend(workspace_writable=True)
 
@@ -166,11 +163,11 @@ async def _filesystem_agent_factory(provider: str, model: str):
         assert read.error is None, read.error
         # A nested working file appears without registration as a chat artifact.
         await backend.awrite("/workspace/nested/observed.py", read.file_data["content"])
-        return {"files": {**state["files"], "/findings/committed.md": {
-            "content": "Specialist observation", "created_at": "2026-10-14", "modified_at": "2026-10-14",
-        }}}
+        written = await backend.awrite("/findings/committed.md", "Specialist observation")
+        assert written.error is None, written.error
+        return {}
 
-    graph = StateGraph(State, context_schema=RuntimeModelContext)
+    graph = StateGraph(FilesystemState, context_schema=RuntimeModelContext)
     graph.add_node("observe", observe)
     graph.add_edge(START, "observe")
     graph.add_edge("observe", END)
@@ -224,6 +221,103 @@ def test_checkpointed_interrupt_blocks_edits_after_stream_returns(client, user_i
     })
     assert result.status_code == 409, result.text
     assert files.store.paused(files.workspace_id)
+
+
+def test_delta_files_survive_handoff_snapshots_and_restart(monkeypatch, user_id, tmp_path):
+    from deepagents.backends.utils import create_file_data
+    from deepagents.middleware.filesystem import FilesystemState
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from juena_core.agents.backends import FindingsStateBackend
+    from juena_core.agents.delegation import SpecialistDelegate
+    from juena_core.filesystem.service import ConversationFilesystem
+    from juena_core.filesystem.storage import WorkspaceStore
+
+    monkeypatch.setattr(config_module, "_settings", make_settings())
+    monkeypatch.setattr(registry_module, "_agent_registry", {})
+    monkeypatch.setattr(registry_module, "_agent_factories", {})
+    filesystem = ConversationFilesystem(
+        WorkspaceStore(tmp_path / "files"), identity_secret="delta-test-identity-secret-32-characters",
+    )
+
+    async def factory(provider, model):
+        async def record(state):
+            backend = FindingsStateBackend()
+            result = await backend.awrite("/note.md", "Specialist evidence")
+            assert result.error is None
+            return {"messages": [AIMessage(content="Recorded the finding.")]}
+
+        specialist = StateGraph(FilesystemState)
+        specialist.add_node("record", record)
+        specialist.add_edge(START, "record")
+        specialist.add_edge("record", END)
+        parent = StateGraph(FilesystemState)
+        parent.add_node("delegate", SpecialistDelegate(specialist.compile(), name="specialist"))
+        parent.add_edge(START, "delegate")
+        parent.add_edge("delegate", END)
+        return object(), parent.compile(checkpointer=get_checkpointer())
+
+    registry_module.register_agent_factory(SIMULATOR, factory, set_as_default=True)
+    thread_id = None
+    expected_input = "pasted input"
+
+    def assert_files(client):
+        base = f"/threads/{thread_id}/filesystem"
+        listing = client.get(base, params={"path": "/findings"})
+        assert listing.status_code == 200, listing.text
+        assert [entry["path"] for entry in listing.json()["entries"]] == ["/findings/note.md"]
+        for path, text in (("/findings/note.md", "Specialist evidence"),
+                           ("/inputs/message.txt", expected_input)):
+            preview = client.get(base + "/file", params={"path": path})
+            assert preview.status_code == 200, preview.text
+            assert preview.json()["text"] == text
+            assert preview.json()["editable"] is False
+            assert client.get(base + "/download", params={"path": path}).content == text.encode()
+            assert client.put(base + "/file", json={
+                "path": path, "text": "overwrite", "revision": "a" * 64,
+            }).status_code == 403
+        # Migration must see legacy uploads in the reconstructed state too.
+        assert client.get(base + "/download", params={
+            "path": "/workspace/uploads/legacy.txt",
+        }).content == b"legacy bytes"
+        assert client.get(base + "/download", params={
+            "path": "/inputs/uploads/legacy.txt",
+        }).content == b"legacy bytes"
+
+    # A second lifespan recreates the connection pool, saver, and compiled agent.
+    for restart in (False, True):
+        app = create_app(principal=local_principal(user_id=user_id), filesystem=filesystem)
+        with TestClient(app) as client:
+            if restart:
+                assert_files(client)
+                continue
+            thread_id = _create_chat(client, SIMULATOR)
+            config = {"configurable": {"thread_id": thread_id}}
+
+            async def seed():
+                graph = await registry_module.get_agent(SIMULATOR)
+                await graph.ainvoke({"messages": [HumanMessage(content="Record evidence")], "files": {
+                    "/inputs/message.txt": create_file_data(expected_input),
+                    "/inputs/uploads/legacy.txt": create_file_data("legacy bytes"),
+                }}, config)
+                raw = await get_checkpointer().aget(config)
+                assert not raw["channel_values"].get("files")
+
+            client.portal.call(seed)
+            assert_files(client)
+
+            async def update_inputs():
+                graph = await registry_module.get_agent(SIMULATOR)
+                # Cross the real FilesystemState's 50-step snapshot interval,
+                # then leave a newer delta that raw snapshot reads would miss.
+                for number in range(55):
+                    await graph.aupdate_state(config, {"files": {
+                        "/inputs/message.txt": create_file_data(f"revision {number}"),
+                    }})
+
+            client.portal.call(update_inputs)
+            expected_input = "revision 54"
+            assert_files(client)
 
 
 # --------------------------------------------------------------------------

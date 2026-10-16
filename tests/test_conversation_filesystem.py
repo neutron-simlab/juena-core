@@ -213,16 +213,15 @@ def api(filesystem, files, monkeypatch):
         if user_id != "alice" or thread_id != "conversation":
             raise ChatNotFoundError(thread_id)
         return SimpleNamespace(agent_id="test")
-    async def checkpoint(config):
-        return {"channel_values": {"files": {"/findings/note.md": create_file_data("a finding")}}}
+    async def snapshot(config):
+        return SimpleNamespace(values={"files": {"/findings/note.md": create_file_data("a finding")}})
     async def agent(agent_id):
-        return object()
+        return SimpleNamespace(aget_state=snapshot)
     async def pending(*args):
         return None
     async def session():
         yield object()
     monkeypatch.setattr(module, "get_owned_chat", owner)
-    monkeypatch.setattr(module, "get_checkpointer", lambda: SimpleNamespace(aget=checkpoint))
     monkeypatch.setattr(module, "get_agent", agent)
     monkeypatch.setattr(module, "first_pending_interrupt", pending)
     app = FastAPI()

@@ -49,14 +49,14 @@ def setup():
             raise ChatNotFoundError(thread_id)
         return SimpleNamespace(agent_id="test")
 
-    async def checkpoint(config):
-        return {"channel_values": {"files": {
+    async def snapshot(config):
+        return SimpleNamespace(values={"files": {
             "/inputs/message.txt": create_file_data("pasted input"),
             "/findings/note.md": create_file_data("specialist observation"),
-        }}}
+        }})
 
     async def agent(_agent_id):
-        return object()
+        return SimpleNamespace(aget_state=snapshot)
 
     async def pending(*args):
         return object() if paused else None
@@ -65,7 +65,6 @@ def setup():
         yield object()
 
     routes.get_owned_chat = owner
-    routes.get_checkpointer = lambda: SimpleNamespace(aget=checkpoint)
     routes.get_agent = agent
     routes.first_pending_interrupt = pending
     api.dependency_overrides[get_db_session] = session

@@ -18,7 +18,6 @@ from juena_core.filesystem.service import ConversationFilesystem, MAX_EDIT_BYTES
 from juena_core.filesystem.storage import RevisionConflict, WorkspaceBusy, WorkspaceDeleted, WorkspaceOwnershipError, assert_safe_path
 from juena_core.server.agent.registry import get_agent
 from juena_core.server.chat.repository import ChatNotFoundError, get_owned_chat
-from juena_core.server.database.checkpointer import get_checkpointer
 from juena_core.server.database.connection import get_db_session
 from juena_core.server.identity import Principal, PrincipalDependency
 from juena_core.server.interrupts import ResumeError, first_pending_interrupt
@@ -60,12 +59,16 @@ def build_filesystem_router(principal: PrincipalDependency, filesystem: Conversa
                 config = {"configurable": {"thread_id": thread_id, "user_id": str(user.id)}}
                 if write:
                     await asyncio.to_thread(filesystem.assert_idle, files.workspace_id)
-                    agent = await get_agent(chat.agent_id)
+                agent = await get_agent(chat.agent_id)
+                if write:
                     if await first_pending_interrupt(agent, config) is not None:
                         raise WorkspaceBusy("Answer the pending approval or question before editing files")
                     files.store.mark_paused(files.workspace_id, False)
-                checkpoint = await get_checkpointer().aget(config)
-                state = (checkpoint or {}).get("channel_values", {}).get("files", {})
+                # Deep Agents stores files in a DeltaChannel. Only the graph
+                # reconstructs its writes between snapshots; raw checkpoints
+                # can omit the channel or contain an older snapshot.
+                snapshot = await agent.aget_state(config)
+                state = snapshot.values.get("files", {})
                 if files.store.deleted(files.workspace_id):
                     raise WorkspaceDeleted("Conversation workspace was deleted")
                 async with files.aguard(shared=True):
