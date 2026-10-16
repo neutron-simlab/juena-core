@@ -62,8 +62,9 @@ class SpecialistOutcomeState(AgentState):
     specialist_initial_artifact_ids: NotRequired[
         Annotated[list[str], PrivateStateAttr]
     ]
+    # LangGraph recognizes a reducer only as the final Annotated metadata item.
     execution_events: NotRequired[
-        Annotated[list[ExecutionEvidence], operator.add, PrivateStateAttr]
+        Annotated[list[ExecutionEvidence], PrivateStateAttr, operator.add]
     ]
 
 
