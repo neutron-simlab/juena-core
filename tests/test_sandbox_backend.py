@@ -175,6 +175,47 @@ def test_dropped_plot_is_reported_to_the_model(tmp_path) -> None:
     assert "Artifacts collected automatically" not in result.output
 
 
+class _FailedPlotJobs(_PlotJobs):
+    """A command that writes its plot and then exits with an error."""
+
+    def execute(self, **request):
+        result = super().execute(**request)
+        return SandboxExecutionResult(
+            job_id=result.job_id,
+            output="Traceback: fit did not converge\n",
+            exit_code=1,
+            status="failed",
+            artifact_names=result.artifact_names,
+        )
+
+
+def test_a_successful_run_is_told_to_finish(tmp_path) -> None:
+    store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
+    set_artifact_store_for_tests(store)
+    try:
+        result = _plot_backend(tmp_path).execute("python fit.py")
+    finally:
+        set_artifact_store_for_tests(None)
+
+    assert "Finish the report now." in result.output
+
+
+def test_a_failed_run_with_outputs_is_not_told_to_finish(tmp_path) -> None:
+    """A failed command may still need a fix and a rerun."""
+    store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
+    set_artifact_store_for_tests(store)
+    try:
+        result = _plot_backend(tmp_path, _FailedPlotJobs).execute("python fit.py")
+        refs = store.peek_result_refs("user-a", "thread-a")
+    finally:
+        set_artifact_store_for_tests(None)
+
+    assert result.exit_code == 1
+    assert "Finish the report now" not in result.output
+    assert "The command failed, but these files were collected" in result.output
+    assert [ref.filename for ref in refs] == ["plot.png"]
+
+
 def test_rerunning_a_plot_delivers_only_the_latest_version(tmp_path) -> None:
     """Each rerun rewrites outputs/plot.png; the user should get one plot.
 

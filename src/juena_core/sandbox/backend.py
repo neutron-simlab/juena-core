@@ -56,12 +56,15 @@ STATUS_LABELS = {
 }
 
 
-def _artifact_note(attached: list[ArtifactRef], dropped: list[tuple[str, str]]) -> str:
+def _artifact_note(
+    attached: list[ArtifactRef], dropped: list[tuple[str, str]], *, succeeded: bool
+) -> str:
     """Describe what reached the user and what did not.
 
     A file the sandbox wrote but the application refused is the one thing the
     model must never guess about: with no note it sees a clean exit code and
-    reports a figure the user cannot open.
+    reports a figure the user cannot open. Only a successful command is told
+    to finish; after a failure the model may still need to fix and rerun.
     """
     blocks: list[str] = []
     if attached:
@@ -69,11 +72,20 @@ def _artifact_note(attached: list[ArtifactRef], dropped: list[tuple[str, str]]) 
             f"- {ref.artifact_id} | {ref.filename} | {ref.mime_type} | {ref.caption}"
             for ref in attached
         )
+        if succeeded:
+            advice = (
+                "\nDo not run another command to inspect, encode, print, or "
+                "verify these files. Finish the report now."
+            )
+        else:
+            advice = (
+                "\nThe command failed, but these files were collected and will reach "
+                "the user as they are. If the task still needs a working result, fix "
+                "the problem and run again; files written again replace these. Do not "
+                "run a command only to inspect, encode, or print them."
+            )
         blocks.append(
-            "Artifacts collected automatically by the application:\n"
-            + lines
-            + "\nDo not run another command to inspect, encode, print, or "
-            "verify these files. Finish the report now."
+            "Artifacts collected automatically by the application:\n" + lines + advice
         )
     if dropped:
         blocks.append(undelivered_note(dropped))
@@ -222,7 +234,11 @@ class PodmanSandboxBackend(BaseSandbox):
                 dropped=dropped,
             )
             model_output = result.output.rstrip()
-            note = _artifact_note(attached, dropped)
+            note = _artifact_note(
+                attached,
+                dropped,
+                succeeded=result.status == "completed" and result.exit_code == 0,
+            )
             if note:
                 model_output = "\n\n".join(part for part in (model_output, note) if part)
             return ExecuteResponse(
