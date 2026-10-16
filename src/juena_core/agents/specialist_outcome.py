@@ -6,9 +6,9 @@ import operator
 from collections.abc import Mapping
 from typing import Annotated, Any, NotRequired
 
-from langchain.agents.middleware import AgentMiddleware, AgentState
+from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
 from langchain.agents.middleware.types import PrivateStateAttr
-from langchain_core.messages import AIMessage, merge_content
+from langchain_core.messages import AIMessage, HumanMessage, merge_content
 
 from juena_core.artifacts import (
     ARTIFACT_MESSAGE_KEY,
@@ -25,6 +25,7 @@ __all__ = [
     "VERIFIED_CLOSE",
     "OUTCOME_VERIFIED_KEY",
     "NO_REPORT",
+    "REPORT_REMINDER",
     "NO_SUCCESSFUL_RUN",
     "UNVERIFIED_DIRECTIVE",
     "SpecialistOutcomeState",
@@ -43,9 +44,16 @@ VERIFIED_CLOSE = "</verified_by_server>"
 OUTCOME_VERIFIED_KEY = "juena_outcome_verified"
 
 NO_REPORT = (
-    "The specialist returned no structured report. Its run ended early -- most "
-    "often because the model-call budget was exhausted -- so nothing it said "
-    "mid-run can be treated as a result."
+    "The specialist returned no structured report, so nothing it said mid-run can "
+    "be treated as a result."
+)
+# Marks the one reminder a specialist gets when it answers in plain text.
+REPORT_REMINDER_KEY = "juena_report_reminder"
+REPORT_REMINDER = (
+    "You replied in plain text, but this task ends only with a SpecialistReport "
+    "tool call. Call SpecialistReport now and reuse what you just wrote. If the "
+    "work is unfinished, use status blocked or failed and say what is missing in "
+    "limitations."
 )
 NO_SUCCESSFUL_RUN = (
     "Every execution in this run failed. No calculation, fit, or plot was produced."
@@ -216,6 +224,38 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
 
     async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any]:
         return self.before_agent(state, runtime)
+
+    @hook_config(can_jump_to=["model"])
+    def after_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """Remind a specialist once when it answers without the report tool.
+
+        Some models end with plain text even though the report tool is required.
+        One reminder recovers most of them; a second plain answer still fails
+        closed in after_agent. Tool calls, interrupts, and call-limit endings
+        never reach this point with a plain final message.
+        """
+        values = state if isinstance(state, Mapping) else {}
+        messages = values.get("messages", [])
+        last = messages[-1] if messages else None
+        if not isinstance(last, AIMessage) or last.tool_calls:
+            return None
+        if values.get("structured_response") is not None:
+            return None
+        if any(message.additional_kwargs.get(REPORT_REMINDER_KEY) for message in messages):
+            return None
+        return {
+            "jump_to": "model",
+            "messages": [
+                HumanMessage(
+                    content=REPORT_REMINDER,
+                    additional_kwargs={REPORT_REMINDER_KEY: True},
+                )
+            ],
+        }
+
+    @hook_config(can_jump_to=["model"])
+    async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        return self.after_model(state, runtime)
 
     def _own_artifacts(
         self,

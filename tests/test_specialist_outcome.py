@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -18,6 +18,7 @@ from PIL import Image
 
 from juena_core.schema.agents import SpecialistReport
 from juena_core.agents.specialist_outcome import (
+    REPORT_REMINDER_KEY,
     ExecutionEvidenceMiddleware,
     SpecialistOutcomeMiddleware,
 )
@@ -229,6 +230,99 @@ def test_real_agent_delivers_the_package_as_its_final_message(store) -> None:
     assert isinstance(final, AIMessage)
     assert "Finding: Verified finding." in final.text
     assert "STATUS: VERIFIED" in final.text
+
+
+class _ScriptedModel(FakeMessagesListChatModel):
+    """Replays fixed replies in order and counts how often it was called."""
+
+    calls: int = 0
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.calls += 1
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
+def _report_call() -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "SpecialistReport",
+                "args": {"status": "completed", "finding": "The value is 17.", "evidence": ["Direct evidence"]},
+                "id": "structured-report",
+            }
+        ],
+    )
+
+
+@tool
+def lookup_value() -> str:
+    """Return the stored value."""
+    return "17"
+
+
+def _specialist_agent(model, *extra_middleware):
+    # A real specialist always has tools. Without any, LangChain itself keeps
+    # calling the model until a structured response appears.
+    return create_agent(
+        model=model,
+        tools=[lookup_value],
+        response_format=ToolStrategy(SpecialistReport),
+        middleware=[SpecialistOutcomeMiddleware(specialist_name="specialist"), *extra_middleware],
+    )
+
+
+def _reminders(result) -> list:
+    return [m for m in result["messages"] if m.additional_kwargs.get(REPORT_REMINDER_KEY)]
+
+
+def test_plain_text_answer_gets_one_reminder_and_then_reports(store) -> None:
+    model = _ScriptedModel(responses=[AIMessage("The value is 17."), _report_call()])
+
+    result = _specialist_agent(model).invoke({"messages": [("user", "What is the value?")]})
+
+    assert len(_reminders(result)) == 1
+    assert model.calls == 2
+    assert "STATUS: VERIFIED" in result["messages"][-1].text
+    assert "Finding: The value is 17." in result["messages"][-1].text
+
+
+def test_a_second_plain_answer_still_fails_closed(store) -> None:
+    model = _ScriptedModel(
+        responses=[AIMessage("First plain answer."), AIMessage("Second plain answer."), _report_call()]
+    )
+
+    result = _specialist_agent(model).invoke({"messages": [("user", "What is the value?")]})
+
+    assert len(_reminders(result)) == 1
+    assert model.calls == 2  # the report that would come third is never requested
+    final = result["messages"][-1].text
+    assert "STATUS: UNVERIFIED" in final
+    assert "returned no structured report" in final
+
+
+def test_the_call_budget_still_bounds_the_reminder(store) -> None:
+    """The reminder's extra model call goes through the call limit like any other."""
+
+    model = _ScriptedModel(responses=[AIMessage("Plain answer."), _report_call()])
+    limit = ModelCallLimitMiddleware(run_limit=1, exit_behavior="end")
+
+    result = _specialist_agent(model, limit).invoke({"messages": [("user", "What is the value?")]})
+
+    assert model.calls == 1
+    assert "STATUS: UNVERIFIED" in result["messages"][-1].text
+
+
+def test_a_report_on_the_first_call_gets_no_reminder(store) -> None:
+    model = _ScriptedModel(responses=[_report_call()])
+
+    result = _specialist_agent(model).invoke({"messages": [("user", "What is the value?")]})
+
+    assert _reminders(result) == []
+    assert model.calls == 1
 
 
 def _execution(run_id: str, status: str, exit_code: int) -> dict:

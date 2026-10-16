@@ -477,6 +477,82 @@ async def test_subagent_detection_matches_real_langgraph_namespaces() -> None:
 
 
 @pytest.mark.asyncio
+async def test_specialist_report_reminder_is_not_shown_as_a_user_message() -> None:
+    """The reminder is a HumanMessage inside the specialist, written by the server.
+
+    Streamed through a real supervisor/sub-agent graph, it must not appear in the
+    transcript as if the user had typed it.
+    """
+    from deepagents.backends import StateBackend
+    from deepagents.middleware.subagents import SubAgentMiddleware
+    from langchain.agents import create_agent
+    from langchain.agents.structured_output import ToolStrategy
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.tools import tool
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from juena_core.agents.specialist_outcome import REPORT_REMINDER, SpecialistOutcomeMiddleware
+    from juena_core.schema.agents import SpecialistReport
+
+    class _Model(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ANN003
+            return self
+
+    @tool
+    def lookup_value() -> str:
+        """Return the stored value."""
+        return "17"
+
+    report = AIMessage(
+        content="",
+        tool_calls=[{
+            "name": "SpecialistReport",
+            "args": {"status": "completed", "finding": "The value is 17.", "evidence": ["lookup"]},
+            "id": "r1",
+            "type": "tool_call",
+        }],
+    )
+    specialist = create_agent(
+        model=_Model(responses=[AIMessage(content="The value is 17."), report]),
+        tools=[lookup_value],
+        response_format=ToolStrategy(SpecialistReport),
+        middleware=[SpecialistOutcomeMiddleware(specialist_name="researcher")],
+        name="researcher",
+    )
+    supervisor = create_agent(
+        model=_Model(responses=[
+            AIMessage(content="", tool_calls=[{
+                "name": "task",
+                "args": {"description": "find the value", "subagent_type": "researcher"},
+                "id": "c1",
+                "type": "tool_call",
+            }]),
+            AIMessage(content="The value is 17."),
+        ]),
+        tools=[],
+        middleware=[SubAgentMiddleware(
+            backend=StateBackend(),
+            subagents=[{"name": "researcher", "description": "d", "runnable": specialist}],
+        )],
+        checkpointer=InMemorySaver(),
+    )
+
+    processor = _processor()
+    payloads = []
+    async for node_path, mode, event in supervisor.astream(
+        {"messages": [{"role": "user", "content": "hello"}]},
+        config={"configurable": {"thread_id": "t"}},
+        stream_mode=["updates"],
+        subgraphs=True,
+    ):
+        payloads += await _collect(processor, (tuple(node_path), mode, event))
+
+    shown = [str(p.get("content")) for p in payloads if p["type"] == "message"]
+    assert shown, "the supervisor's answer should still be streamed"
+    assert all(REPORT_REMINDER not in text for text in shown)
+
+
+@pytest.mark.asyncio
 async def test_summarization_deletions_are_not_shown_as_an_error() -> None:
     """`RemoveMessage` trims state; rendering it sent the user an error event.
 

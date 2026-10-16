@@ -208,8 +208,9 @@ class StreamEventProcessor:
             chat_message.run_id = str(self.run_id)
 
             # A specialist's final report is input to the supervisor, not an
-            # answer for the user; the supervisor synthesizes from it.
-            if from_subagent and chat_message.type == "ai":
+            # answer for the user; the supervisor synthesizes from it. Human
+            # messages inside a specialist are server reminders, not the user.
+            if from_subagent and chat_message.type in ("ai", "human"):
                 return
 
             # Echo of the user's own turn.
