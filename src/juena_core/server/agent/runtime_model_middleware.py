@@ -85,6 +85,8 @@ class RuntimeModelMiddleware(AgentMiddleware):
                 "provider": provider,
                 "model": model,
                 "temperature": 0.0,
+                # ModelRetryMiddleware owns retries; see MODEL_MAX_RETRIES.
+                "max_retries": 0,
             }
             # Explicit ``streaming=False`` sets LangChain's internal
             # ``_streaming_disabled`` flag. That prevents LangGraph's messages mode

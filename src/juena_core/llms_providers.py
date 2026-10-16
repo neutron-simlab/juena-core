@@ -82,8 +82,27 @@ def _model_kwargs(
 
     if "streaming" in overrides:
         kwargs["streaming"] = overrides["streaming"]
+        if overrides["streaming"]:
+            # A custom base_url turns usage reporting off for streamed calls;
+            # token counting and summarization need it.
+            kwargs["stream_usage"] = True
 
     return kwargs
+
+
+def same_model(first: Any, second: Any) -> bool:
+    """True when two chat models call the same model at the same endpoint.
+
+    Settings such as max_tokens or timeout do not make a model different: a
+    fallback that only changes them fails the same way as the primary.
+    """
+
+    name = getattr(first, "model_name", None)
+    return name is not None and (
+        name == getattr(second, "model_name", None)
+        and getattr(first, "openai_api_base", None)
+        == getattr(second, "openai_api_base", None)
+    )
 
 
 def _build(

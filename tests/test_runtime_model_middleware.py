@@ -53,6 +53,7 @@ def test_runtime_model_middleware_uses_runtime_context(monkeypatch) -> None:
         "provider": "blablador",
         "model": "minimax-test",
         "temperature": 0.0,
+        "max_retries": 0,
         "streaming": True,
     }
 
@@ -84,4 +85,5 @@ def test_runtime_model_middleware_does_not_explicitly_disable_streaming(
         "provider": "blablador",
         "model": "minimax-test",
         "temperature": 0.0,
+        "max_retries": 0,
     }

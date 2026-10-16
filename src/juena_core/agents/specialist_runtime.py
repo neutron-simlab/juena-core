@@ -81,6 +81,10 @@ BACKGROUND_MODEL_CALL_LIMIT = 150
 BACKGROUND_TOOL_CALL_LIMIT = 400
 # Questions allowed per graph invocation. A resume starts a new invocation.
 ASK_USER_CALL_LIMIT = 3
+# ModelRetryMiddleware owns retries for agent models, so those models are built
+# with max_retries=0; otherwise every middleware attempt also retries in the SDK.
+# They also stream, so the provider timeout bounds the gap between tokens rather
+# than a whole long answer.
 MODEL_MAX_RETRIES = 3
 # Pinned because an upstream default change must not silently change policy.
 TOOL_MAX_RETRIES = 2
@@ -268,7 +272,9 @@ def build_fallback_models(
             )
             continue
         logger.info("Model fallback enabled: %s/%s", provider, model)
-        fallback_models.append(build_chat_model(provider=provider, model=model))
+        fallback_models.append(
+            build_chat_model(provider=provider, model=model, streaming=True, max_retries=0)
+        )
     return fallback_models
 
 

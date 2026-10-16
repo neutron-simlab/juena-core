@@ -356,7 +356,9 @@ def test_fallback_model_uses_only_configured_available_provider(
     )
 
     assert len(specialist_runtime.build_fallback_models()) == 1
-    assert built == [{"provider": "openai", "model": "fallback-model"}]
+    assert built == [
+        {"provider": "openai", "model": "fallback-model", "streaming": True, "max_retries": 0}
+    ]
 
 
 def test_explicit_fallback_models_preserve_order(
@@ -380,6 +382,6 @@ def test_explicit_fallback_models_preserve_order(
 
     assert len(fallbacks) == 2
     assert built == [
-        {"provider": "blablador", "model": "mimo-pro"},
-        {"provider": "blablador", "model": "gpt-oss"},
+        {"provider": "blablador", "model": "mimo-pro", "streaming": True, "max_retries": 0},
+        {"provider": "blablador", "model": "gpt-oss", "streaming": True, "max_retries": 0},
     ]

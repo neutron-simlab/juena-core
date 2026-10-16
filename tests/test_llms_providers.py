@@ -86,6 +86,7 @@ def test_blablador_kwargs_include_endpoint_and_measured_profile(monkeypatch) -> 
         "base_url": "https://blablador.example/v1",
         "profile": {"max_input_tokens": 131_072 - 2_000},
         "streaming": True,
+        "stream_usage": True,
     }
 
 
@@ -160,3 +161,80 @@ def test_unknown_provider_is_rejected(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="Unknown provider: local"):
         providers.build_chat_model(provider="local")
+
+
+def test_same_model_ignores_settings_but_not_model_or_endpoint(monkeypatch) -> None:
+    config = make_settings()
+    monkeypatch.setattr(providers, "settings", lambda: config)
+    qwen = BlabladorModelName.QWEN38_FLASH_NEXT_JUWELS.value
+
+    primary = providers._build("blablador", qwen, 0.0, {"max_tokens": 32_768, "streaming": True})
+    same_with_other_settings = providers._build("blablador", qwen, 0.0, {})
+    other_model = providers._build("blablador", BlabladorModelName.GPT_OSS.value, 0.0, {})
+    other_endpoint = providers._build("openai", qwen, 0.0, {})
+
+    assert providers.same_model(primary, same_with_other_settings)
+    assert not providers.same_model(primary, other_model)
+    assert not providers.same_model(primary, other_endpoint)
+    assert not providers.same_model(object(), object())
+
+
+@pytest.mark.asyncio
+async def test_streamed_specialist_call_keeps_report_tool_call_and_usage(monkeypatch) -> None:
+    """Specialists stream; the report tool call and token usage must survive it."""
+    import json
+
+    import httpx
+    from langchain.agents import create_agent
+    from langchain.agents.structured_output import ToolStrategy
+    from langchain.chat_models import init_chat_model
+    from langchain_core.tools import tool
+
+    from juena_core.schema.agents import SpecialistReport
+
+    config = make_settings()
+    monkeypatch.setattr(providers, "settings", lambda: config)
+    requests: list[dict] = []
+
+    def chunk(**fields) -> str:
+        body = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m", **fields}
+        return "data: " + json.dumps(body) + "\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        arguments = json.dumps({"status": "completed", "finding": "The value is 17."})
+        stream = (
+            chunk(choices=[{"index": 0, "delta": {"role": "assistant", "tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {"name": "SpecialistReport", "arguments": ""}}]}, "finish_reason": None}])
+            + chunk(choices=[{"index": 0, "delta": {"tool_calls": [{
+                "index": 0, "function": {"arguments": arguments}}]}, "finish_reason": None}])
+            + chunk(choices=[{"index": 0, "delta": {}, "finish_reason": "tool_calls"}])
+            + chunk(choices=[], usage={"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18})
+            + "data: [DONE]\n\n"
+        )
+        return httpx.Response(200, text=stream, headers={"content-type": "text/event-stream"})
+
+    kwargs = providers._model_kwargs(
+        "blablador", BlabladorModelName.QWEN38_FLASH_NEXT_JUWELS.value, 0.0,
+        {"streaming": True, "max_retries": 0},
+    )
+    model = init_chat_model(
+        BlabladorModelName.QWEN38_FLASH_NEXT_JUWELS.value,
+        **kwargs,
+        http_async_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    @tool
+    def lookup_value() -> str:
+        """Return the stored value."""
+        return "17"
+
+    agent = create_agent(model=model, tools=[lookup_value], response_format=ToolStrategy(SpecialistReport))
+    result = await agent.ainvoke({"messages": [("user", "What is the value?")]})
+
+    assert requests[0]["stream"] is True
+    assert requests[0]["stream_options"] == {"include_usage": True}
+    assert result["structured_response"].finding == "The value is 17."
+    model_reply = next(m for m in result["messages"] if getattr(m, "tool_calls", None))
+    assert model_reply.usage_metadata["input_tokens"] == 11
