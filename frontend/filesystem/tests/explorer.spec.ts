@@ -162,9 +162,43 @@ test('previews, downloads, scratch, read-only inputs and notes', async ({ page }
   await panel(page).getByRole('button', { name: '↑ Up', exact: true }).click();
   await entry(page, '/findings').click();
   await entry(page, '/findings/note.md').click();
+  await expect(panel(page).getByLabel('Preview of /findings/note.md')).toHaveText('specialist observation');
+  await panel(page).getByRole('button', { name: 'Source', exact: true }).click();
   await expect.poll(() => value(page)).toBe('specialist observation');
   await expect(panel(page).getByText(/Specialist observations/)).toBeVisible();
   await expect(panel(page).getByRole('button', { name: 'Save', exact: true })).toHaveCount(0);
+});
+
+test('markdown opens rendered, without running its HTML, and Edit previews the draft', async ({ page }) => {
+  await entry(page, '/workspace/report.md').click();
+  const rendered = panel(page).getByLabel('Preview of /workspace/report.md');
+  await expect(rendered.getByRole('heading', { name: 'SANS fit' })).toBeVisible();
+  await expect(rendered.getByRole('cell', { name: '4.2 nm' })).toBeVisible();
+  await expect(editor(page)).toHaveCount(0);
+  await expect(rendered.getByRole('link', { name: 'docs' })).toHaveAttribute('target', '_blank');
+  expect(await rendered.getByRole('link', { name: 'bad' }).getAttribute('href') ?? '').not.toContain('javascript');
+  expect(await page.evaluate(() => (window as any).unsafeMarkdown)).toBeUndefined();
+  await expect(rendered.locator('img')).toHaveCount(0);
+  await panel(page).getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect.poll(() => value(page)).toContain('# SANS fit');
+  await edit(page, '# Revised fit\n');
+  await panel(page).getByRole('button', { name: 'Preview', exact: true }).click();
+  await expect(rendered.getByRole('heading', { name: 'Revised fit' })).toBeVisible();
+  await expect(panel(page).getByText('Unsaved changes', { exact: true })).toBeVisible();
+});
+
+test('an open file grows into the height the page gives the panel', async ({ page }) => {
+  // What an application's layout CSS does; the custom property inherits into the component.
+  await page.addStyleTag({ content: ':root { --juena-files-height: 1400px; }' });
+  await expect.poll(async () => (await panel(page).boundingBox())!.height).toBeLessThan(1400);
+  await entry(page, '/workspace/report.md').click();
+  await expect(panel(page).locator('.markdown')).toBeVisible();
+  expect(Math.round((await panel(page).boundingBox())!.height)).toBe(1400);
+  expect((await panel(page).locator('.markdown').boundingBox())!.height).toBeGreaterThan(340);
+  await panel(page).getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect.poll(async () => (await editor(page).boundingBox())!.height).toBeGreaterThan(340);
+  await panel(page).getByRole('button', { name: 'Close file', exact: true }).click();
+  await expect.poll(async () => (await panel(page).boundingBox())!.height).toBeLessThan(1400);
 });
 
 test('late responses cannot cross conversations; auth loss and new sessions clear drafts', async ({ page }) => {

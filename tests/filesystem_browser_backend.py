@@ -79,6 +79,11 @@ def setup():
                 "outputs/nested/result.txt": b"uncached result\n",
                 "outputs/other.txt": b"other file\n",
                 "preview.html": b"<script>window.unsafePreview = true</script>",
+                "report.md": (
+                    b"# SANS fit\n\n| param | value |\n| --- | --- |\n| R | 4.2 nm |\n\n"
+                    b"[docs](https://example.org/docs) [bad](javascript:alert(1))\n\n"
+                    b"<img src=x onerror=\"window.unsafeMarkdown = true\">\n"
+                ),
                 "notebook.ipynb": b'{"cells": []}',
                 "picture.png": base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII="),
                 "binary.bin": b"\x00\xff\x01",

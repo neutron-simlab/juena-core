@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { FrontendRendererArgs } from '@streamlit/component-v2-lib';
 import { Editor } from './Editor';
+import { MarkdownPreview } from './Markdown';
 import { ApiError, basename, cache, dirty, fileUrl, getStore, parent, request, type Data, type Draft, type Page, type Preview, type View } from './state';
 import './style.css';
 
@@ -22,6 +23,8 @@ function Explorer({ data, publish, ask, authLost }: { data: Data } & Bridge) {
   const [confirm, setConfirm] = useState<(() => void) | null>(null);
   const [imageUrl, setImageUrl] = useState('');
   const [queued, setQueued] = useState('');
+  // Markdown opens rendered; Edit shows the same draft's source in the editor.
+  const [showSource, setShowSource] = useState(false);
   const alive = useRef(true);
   const update = (change: Partial<View>, editing = false) => {
     const next = { ...store.view, ...change };
@@ -163,10 +166,13 @@ function Explorer({ data, publish, ask, authLost }: { data: Data } & Bridge) {
   const openFile = (path: string) => guard(() => {
     const cached = store.previews.get(path);
     update({ draft: cached ? { preview: cached.value, text: cached.value.text } : null });
-    setFilePath(path); setQueued(''); setFileNotice('');
+    setFilePath(path); setQueued(''); setFileNotice(''); setShowSource(false);
   });
+  const markdown = !!preview?.is_text && preview.path.toLowerCase().endsWith('.md');
+  // An open file grows into the height the page gives the panel (style.css).
+  const fileOpen = !!filePath && !view.collapsed && !denied;
   const paths = view.cwd.split('/').filter(Boolean);
-  return <section className="explorer" aria-label="Conversation files" data-conversation={data.threadId}>
+  return <section className={fileOpen ? 'explorer file-open' : 'explorer'} aria-label="Conversation files" data-conversation={data.threadId}>
     <button className="heading" aria-expanded={!view.collapsed} onClick={() => update({ collapsed: !view.collapsed })}>
       <span>Files</span><span aria-hidden="true">{view.collapsed ? '▸' : '▾'}</span>
     </button>
@@ -205,7 +211,11 @@ function Explorer({ data, publish, ask, authLost }: { data: Data } & Bridge) {
           {fileLoading && <p className="caption" role="status">Loading file…</p>}
           {preview && <>
             <p className="caption">{preview.size.toLocaleString()} bytes{!preview.editable && ' · Read-only'}</p>
-            {preview.is_text ? <Editor path={preview.path} text={view.draft!.text} readOnly={!preview.editable || saving} onChange={text => {
+            {markdown && <div className="toolbar">
+              <button aria-pressed={!showSource} onClick={() => setShowSource(false)}>Preview</button>
+              <button aria-pressed={showSource} onClick={() => setShowSource(true)}>{preview.editable ? 'Edit' : 'Source'}</button>
+            </div>}
+            {markdown && !showSource ? <MarkdownPreview path={preview.path} text={view.draft!.text} /> : preview.is_text ? <Editor path={preview.path} text={view.draft!.text} readOnly={!preview.editable || saving} onChange={text => {
               if (store.view.draft && text !== store.view.draft.text) update({ draft: { ...store.view.draft, text } }, true);
             }} /> : imageUrl ? <img className="image" src={imageUrl} alt={basename(filePath)} /> : <p className="caption">Download this file to view it.</p>}
             {preview.truncated && <p className="caption">Preview truncated. Editing is limited to 1 MiB.</p>}

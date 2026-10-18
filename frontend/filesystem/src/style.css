@@ -22,5 +22,23 @@ button:focus-visible { outline: 2px solid #5286bd; outline-offset: 2px; }
 .file-path { display: block; margin: 7px 0; }
 .editor { width: 100%; height: 340px; border: 1px solid #e2e5e9; border-radius: 5px; }
 .image { width: 100%; object-fit: contain; }
-.primary { background: #e2efff; color: #174771; font-weight: 600; }
+.primary, button[aria-pressed="true"] { background: #e2efff; color: #174771; font-weight: 600; }
+.markdown { height: 340px; overflow: auto; border: 1px solid #e2e5e9; border-radius: 5px; padding: 2px 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.markdown h1 { font-size: 18px; } .markdown h2 { font-size: 16px; } .markdown h3, .markdown h4 { font-size: 14px; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 { margin: 14px 0 6px; line-height: 1.3; }
+.markdown code { font-size: 12px; background: #f3f4f6; border-radius: 3px; padding: 1px 4px; }
+.markdown pre { background: #f6f8fa; border-radius: 5px; padding: 8px; overflow-x: auto; }
+.markdown pre code { background: none; padding: 0; }
+.markdown table { border-collapse: collapse; display: block; overflow-x: auto; margin: 8px 0; }
+.markdown th, .markdown td { border: 1px solid #e2e5e9; padding: 4px 8px; text-align: left; }
+.markdown blockquote { border-left: 3px solid #d7dce3; color: #5b6170; margin: 8px 0; padding-left: 10px; }
+.markdown img { max-width: 100%; }
+/* A page can give the panel a height through --juena-files-height, which
+   inherits into this shadow root. With a file open, the panel is at least that
+   tall and the file view takes whatever the controls around it leave.
+   Unset, the panel sizes to its content as before. */
+.file-open { display: flex; flex-direction: column; min-height: var(--juena-files-height, auto); }
+.file-open > *, .file-open .preview > * { flex-shrink: 0; }
+.file-open .preview { flex-grow: 1; display: flex; flex-direction: column; }
+.file-open .editor, .file-open .markdown { flex-grow: 1; }
 .confirm { position: sticky; bottom: 10px; background: #fff8e8; color: #433b24; border: 1px solid #ddc99a; border-radius: 7px; padding: 10px; z-index: 10; box-shadow: 0 4px 15px #0002; }
