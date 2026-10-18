@@ -37,7 +37,10 @@ from juena_core.agents.backends import (
 )
 from juena_core.agents.delegation import with_delegation_boundary
 from juena_core.agents.loop_guard import RepeatedToolCallMiddleware
-from juena_core.agents.specialist_outcome import SpecialistOutcomeMiddleware
+from juena_core.agents.specialist_outcome import (
+    ReportWhenToolsRunOutMiddleware,
+    SpecialistOutcomeMiddleware,
+)
 from juena_core.config import settings
 from juena_core.llms_providers import (
     build_chat_model,
@@ -52,9 +55,7 @@ logger = get_logger(__name__)
 __all__ = [
     "SUPERVISOR_MODEL_CALL_LIMIT",
     "SUPERVISOR_TOOL_CALL_LIMIT",
-    "SPECIALIST_MODEL_CALL_LIMIT",
     "SPECIALIST_TOOL_CALL_LIMIT",
-    "BACKGROUND_MODEL_CALL_LIMIT",
     "BACKGROUND_TOOL_CALL_LIMIT",
     "ASK_USER_CALL_LIMIT",
     "MODEL_MAX_RETRIES",
@@ -73,11 +74,12 @@ __all__ = [
 
 SUPERVISOR_MODEL_CALL_LIMIT = 50
 SUPERVISOR_TOOL_CALL_LIMIT = 100
-SPECIALIST_MODEL_CALL_LIMIT = 60
 SPECIALIST_TOOL_CALL_LIMIT = 150
+# Specialists have no model-call cap: a larger model may need many calls to think.
+# The tool budget bounds a run, and ReportWhenToolsRunOutMiddleware makes the
+# specialist report once it is spent instead of ending with nothing.
 # Background work gets a wider budget because nobody is watching a spinner.
 # The application's wall-clock timeout remains the real bound.
-BACKGROUND_MODEL_CALL_LIMIT = 150
 BACKGROUND_TOOL_CALL_LIMIT = 400
 # Questions allowed per graph invocation. A resume starts a new invocation.
 ASK_USER_CALL_LIMIT = 3
@@ -212,11 +214,15 @@ def build_specialist_backend(
 def resilience_middleware(
     fallback_models: Sequence[Any],
     *,
-    model_call_limit: int,
+    model_call_limit: int | None,
     tool_call_limit: int,
     ask_user_bound: bool = True,
 ) -> list[Any]:
-    """Build retry, fallback, and per-invocation budget middleware in nesting order."""
+    """Build retry, fallback, and per-invocation budget middleware in nesting order.
+
+    ``model_call_limit=None`` leaves the number of model calls open; the tool
+    budget still bounds the run.
+    """
 
     middleware: list[Any] = []
     if fallback_models:
@@ -225,9 +231,14 @@ def resilience_middleware(
         [
             ModelRetryMiddleware(max_retries=MODEL_MAX_RETRIES, on_failure="error"),
             ToolRetryMiddleware(max_retries=TOOL_MAX_RETRIES),
-            ModelCallLimitMiddleware(run_limit=model_call_limit, exit_behavior="end"),
-            ToolCallLimitMiddleware(run_limit=tool_call_limit, exit_behavior="continue"),
         ]
+    )
+    if model_call_limit is not None:
+        middleware.append(
+            ModelCallLimitMiddleware(run_limit=model_call_limit, exit_behavior="end")
+        )
+    middleware.append(
+        ToolCallLimitMiddleware(run_limit=tool_call_limit, exit_behavior="continue")
     )
     if ask_user_bound:
         middleware.append(
@@ -353,22 +364,18 @@ def build_specialist_middleware(
                 tools="all" if filesystem_tools == "all" else list(filesystem_tools),
             )
         )
+    tool_call_limit = (
+        BACKGROUND_TOOL_CALL_LIMIT if unattended else SPECIALIST_TOOL_CALL_LIMIT
+    )
     middleware.extend(
         [
             create_summarization_middleware(summarizer_model, backend),
             PatchToolCallsMiddleware(),
+            ReportWhenToolsRunOutMiddleware(tool_call_limit),
             *resilience_middleware(
                 fallback_models,
-                model_call_limit=(
-                    BACKGROUND_MODEL_CALL_LIMIT
-                    if unattended
-                    else SPECIALIST_MODEL_CALL_LIMIT
-                ),
-                tool_call_limit=(
-                    BACKGROUND_TOOL_CALL_LIMIT
-                    if unattended
-                    else SPECIALIST_TOOL_CALL_LIMIT
-                ),
+                model_call_limit=None,
+                tool_call_limit=tool_call_limit,
                 ask_user_bound=not unattended,
             ),
         ]

@@ -154,6 +154,27 @@ def _specialist_stack(monkeypatch: pytest.MonkeyPatch, **overrides) -> list:
     )
 
 
+@pytest.mark.parametrize("unattended", [False, True])
+def test_specialists_have_no_model_call_cap_and_report_when_tools_run_out(
+    monkeypatch: pytest.MonkeyPatch, unattended: bool
+) -> None:
+    from juena_core.agents.specialist_outcome import ReportWhenToolsRunOutMiddleware
+
+    stack = _specialist_stack(monkeypatch, unattended=unattended)
+
+    assert "ModelCallLimitMiddleware" not in _names(stack)
+    [report] = [m for m in stack if isinstance(m, ReportWhenToolsRunOutMiddleware)]
+    [tool_limit] = [
+        m for m in stack
+        if type(m).__name__ == "ToolCallLimitMiddleware" and m.tool_name is None
+    ]
+    assert report.tool_call_limit == tool_limit.run_limit == (
+        specialist_runtime.BACKGROUND_TOOL_CALL_LIMIT
+        if unattended
+        else specialist_runtime.SPECIALIST_TOOL_CALL_LIMIT
+    )
+
+
 def test_a_specialist_gets_every_filesystem_tool_unless_it_asks_otherwise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

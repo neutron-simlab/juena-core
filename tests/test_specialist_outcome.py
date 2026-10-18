@@ -465,3 +465,59 @@ async def test_checkpointed_execution_history_is_filtered_on_real_consecutive_tu
     assert "completed (exit 0)" in first["messages"][-1].text
     assert "failed (exit 9)" in second["messages"][-1].text
     assert "completed (exit 0)" not in second["messages"][-1].text
+
+class _ToolHungryModel(FakeMessagesListChatModel):
+    """Calls `lookup_value` whenever it is offered, like a model that keeps
+    researching; it can only report when no other tool is bound."""
+
+    offered: list[list[str]] = []
+    last_prompts: list[str] = []
+
+    def bind_tools(self, tools, **kwargs):
+        self.offered.append([getattr(t, "name", None) or t["function"]["name"] for t in tools])
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        self.last_prompts.append(str(messages[-1].content))
+        if "lookup_value" in self.offered[-1]:
+            reply = AIMessage(content="", tool_calls=[
+                {"name": "lookup_value", "args": {}, "id": f"lookup-{len(self.offered)}"}
+            ])
+        else:
+            reply = _report_call()
+        return ChatResult(generations=[ChatGeneration(message=reply)])
+
+
+def test_a_spent_tool_budget_ends_in_a_report_not_an_empty_run() -> None:
+    """With no model-call cap, the tool budget bounds a specialist. Once it is
+    spent, the next call may only submit the report, so the run ends with what
+    the specialist found instead of looping on refused tools."""
+    from langchain.agents.middleware import ToolCallLimitMiddleware
+
+    from juena_core.agents.specialist_outcome import (
+        TOOL_BUDGET_SPENT,
+        ReportWhenToolsRunOutMiddleware,
+    )
+
+    limit = ReportWhenToolsRunOutMiddleware.REPORT_RESERVE + 2  # two research calls
+    model = _ToolHungryModel(responses=[AIMessage(content="unused")], offered=[], last_prompts=[])
+    agent = _specialist_agent(
+        model,
+        ReportWhenToolsRunOutMiddleware(tool_call_limit=limit),
+        ToolCallLimitMiddleware(run_limit=limit, exit_behavior="continue"),
+    )
+
+    result = agent.invoke({"messages": [HumanMessage(content="Find the value.")]})
+
+    tool_replies = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert [m.content for m in tool_replies if m.name == "lookup_value"] == ["17", "17"]
+    # The report is not refused by the tool limit it was forced to respect.
+    assert not any("limit exceeded" in str(m.content) for m in tool_replies)
+    assert model.offered[-1] == ["SpecialistReport"]
+    assert model.last_prompts[-1] == TOOL_BUDGET_SPENT
+    final = result["messages"][-1].content
+    assert "STATUS: VERIFIED" in final
+    assert "The value is 17." in final
+

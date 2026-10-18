@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import operator
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Annotated, Any, NotRequired
 
-from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    AgentState,
+    ModelRequest,
+    ModelResponse,
+    hook_config,
+)
 from langchain.agents.middleware.types import PrivateStateAttr
 from langchain_core.messages import AIMessage, HumanMessage, merge_content
 
@@ -26,6 +32,7 @@ __all__ = [
     "OUTCOME_VERIFIED_KEY",
     "NO_REPORT",
     "REPORT_REMINDER",
+    "TOOL_BUDGET_SPENT",
     "NO_SUCCESSFUL_RUN",
     "UNVERIFIED_DIRECTIVE",
     "SpecialistOutcomeState",
@@ -33,6 +40,7 @@ __all__ = [
     "SpecialistOutcomeMiddleware",
     "ExecutionEvidenceMiddleware",
     "ArtifactMessageMiddleware",
+    "ReportWhenToolsRunOutMiddleware",
 ]
 
 REPORT_OPEN = "<specialist_report>"
@@ -61,6 +69,12 @@ NO_SUCCESSFUL_RUN = (
 UNVERIFIED_DIRECTIVE = (
     "Tell the user this attempt failed and say why. Use ask_user to offer concrete "
     "next steps. Do not report results, values, plots, or file names -- none exist."
+)
+
+
+TOOL_BUDGET_SPENT = (
+    "The tool budget for this task is spent. Submit the SpecialistReport now with "
+    "what you have established, and list what you could not finish under limitations."
 )
 
 
@@ -432,3 +446,48 @@ class ArtifactMessageMiddleware(AgentMiddleware):
         runtime: Any,
     ) -> dict[str, Any] | None:
         return self.after_agent(state, runtime)
+
+class ReportWhenToolsRunOutMiddleware(AgentMiddleware):
+    """Turn a spent tool budget into a report instead of an empty run.
+
+    ``ToolCallLimitMiddleware(exit_behavior="continue")`` only refuses further
+    tool calls, so a model that keeps reaching for tools never finishes, and a
+    run cut off without a report loses everything it found. Near the limit,
+    every model call may only submit the structured report: with
+    ``ToolStrategy`` LangChain adds the report tool to the request's tools and
+    forces a tool call, so emptying the tools leaves the report as the only
+    choice.
+
+    The limit counts the report call too, and refuses every call once reached,
+    so the report is forced ``REPORT_RESERVE`` calls early. The reserve covers
+    parallel calls in the last research step and a retried report.
+    """
+
+    REPORT_RESERVE = 10
+
+    def __init__(self, tool_call_limit: int) -> None:
+        super().__init__()
+        self.tool_call_limit = tool_call_limit
+
+    def _report_only(self, request: ModelRequest) -> ModelRequest:
+        spent = request.state.get("run_tool_call_count", {}).get("__all__", 0)
+        if spent < self.tool_call_limit - self.REPORT_RESERVE:
+            return request
+        return request.override(
+            tools=[],
+            messages=[*request.messages, HumanMessage(content=TOOL_BUDGET_SPENT)],
+        )
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        return handler(self._report_only(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Any],
+    ) -> ModelResponse:
+        return await handler(self._report_only(request))
