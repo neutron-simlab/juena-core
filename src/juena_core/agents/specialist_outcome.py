@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import operator
+import re
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware import (
@@ -14,8 +16,10 @@ from langchain.agents.middleware import (
     hook_config,
 )
 from langchain.agents.middleware.types import PrivateStateAttr
+from deepagents.backends.utils import create_file_data
 from langchain_core.messages import AIMessage, HumanMessage, merge_content
 
+from juena_core.agents.backends import FINDINGS_PREFIX
 from juena_core.artifacts import (
     ARTIFACT_MESSAGE_KEY,
     get_artifact_store,
@@ -33,6 +37,7 @@ __all__ = [
     "NO_REPORT",
     "REPORT_REMINDER",
     "TOOL_BUDGET_SPENT",
+    "SAVED_REPORT_MIN_TOOL_CALLS",
     "NO_SUCCESSFUL_RUN",
     "UNVERIFIED_DIRECTIVE",
     "SpecialistOutcomeState",
@@ -187,6 +192,7 @@ def _verified_block(
     artifacts: list[ResultArtifactEvidence],
     undelivered: list[tuple[str, str]],
     failures: list[str],
+    saved_note: str | None = None,
 ) -> str:
     lines = [f"{subject_label}: {subject}"]
     if failures:
@@ -199,6 +205,12 @@ def _verified_block(
     if undelivered:
         lines.append("Produced but NOT delivered to the user:")
         lines.extend(f"- {filename}: {reason}" for filename, reason in undelivered)
+    if saved_note:
+        lines.append(
+            f"Report saved for later work: {saved_note} (the server's copy of this "
+            "report; its content is the specialist's, not verified). Name this path "
+            "in the objective when the next delegation builds on this work."
+        )
     if failures:
         lines.append(UNVERIFIED_DIRECTIVE)
     body = "\n".join(lines)
@@ -210,6 +222,67 @@ def _execution_failures(executions: list[ExecutionEvidence]) -> list[str]:
     return [NO_SUCCESSFUL_RUN] if attempted and not any(
         event.succeeded for event in attempted
     ) else []
+
+
+#: Research tool calls a run needs before its report is worth keeping. A single
+#: catalogue lookup is its own answer; rereading it costs nothing.
+SAVED_REPORT_MIN_TOOL_CALLS = 3
+_REPORT_TOOL = SpecialistReport.__name__
+
+
+def _research_tool_calls(messages: list[Any]) -> list[dict[str, Any]]:
+    return [
+        call
+        for message in messages
+        if isinstance(message, AIMessage)
+        for call in message.tool_calls
+        if call["name"] not in (_REPORT_TOOL, "ask_user")
+    ]
+
+
+def _wrote_findings(calls: list[dict[str, Any]]) -> bool:
+    return any(
+        call["name"] in ("write_file", "edit_file")
+        and str(call["args"].get("file_path", "")).startswith(FINDINGS_PREFIX)
+        for call in calls
+    )
+
+
+def _report_title(report: SpecialistReport) -> str:
+    first = next((line for line in report.finding.splitlines() if line.strip()), "")
+    return first.strip().lstrip("#").strip()[:100] or "Specialist report"
+
+
+def _note_path(report: SpecialistReport, files: Mapping[str, Any]) -> str:
+    """`/findings/<slug>.md` from the finding's first line, never overwriting."""
+    words = re.findall(r"[a-z0-9]+", _report_title(report).lower())[:6]
+    stem = "-".join(words)[:50].strip("-") or "report"
+    path, number = f"{FINDINGS_PREFIX}{stem}.md", 2
+    while path in files:
+        path, number = f"{FINDINGS_PREFIX}{stem}-{number}.md", number + 1
+    return path
+
+
+def _report_note(report: SpecialistReport, *, specialist: str, objective: str) -> str:
+    sections = [
+        f"# {_report_title(report)}",
+        f"Saved by the server from the {specialist} report on "
+        f"{datetime.now(UTC):%Y-%m-%d %H:%M} UTC. The specialist wrote this text and "
+        "the server did not verify it: re-check values against the sources it names.",
+        f"Status: {report.status}",
+        "## Objective",
+        objective,
+        "## Finding",
+        report.finding,
+    ]
+    for label, items in (
+        ("Evidence", report.evidence),
+        ("Actions", report.actions),
+        ("Limitations", report.limitations),
+    ):
+        if items:
+            sections.extend([f"## {label}", "\n".join(f"- {item}" for item in items)])
+    return "\n\n".join(sections) + "\n"
 
 
 def _final_ai_message(state: Any) -> AIMessage | None:
@@ -319,6 +392,7 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
                 }
             )
 
+        note = self._saved_report(report, values)
         package = "\n\n".join(
             [
                 _report_block(report),
@@ -329,10 +403,11 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
                     artifacts=artifacts,
                     undelivered=undelivered,
                     failures=failures,
+                    saved_note=next(iter(note), None),
                 ),
             ]
         )
-        return {
+        update: dict[str, Any] = {
             "structured_response": None,
             "messages": [
                 AIMessage(
@@ -341,6 +416,35 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
                 )
             ],
         }
+        if note:
+            update["files"] = note
+        return update
+
+    def _saved_report(
+        self, report: SpecialistReport | None, values: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Keep a real piece of work in `/findings/` so the next task can build on it.
+
+        Whether a finding gets written used to rest on the supervisor asking for
+        one, and a model judging that call skipped it after long research. A
+        report the specialist already filed as its own note, a short lookup, and
+        an agent without a `files` channel are left alone.
+        """
+        files = values.get("files")
+        messages = values.get("messages") or []
+        calls = _research_tool_calls(messages)
+        if (
+            report is None
+            or not isinstance(files, Mapping)
+            or len(calls) < SAVED_REPORT_MIN_TOOL_CALLS
+            or _wrote_findings(calls)
+        ):
+            return {}
+        objective = next(
+            (str(m.content) for m in messages if isinstance(m, HumanMessage)), ""
+        )
+        content = _report_note(report, specialist=self._specialist_name, objective=objective)
+        return {_note_path(report, files): create_file_data(content)}
 
     async def aafter_agent(self, state: Any, runtime: Any) -> dict[str, Any]:
         return self.after_agent(state, runtime)
@@ -446,6 +550,7 @@ class ArtifactMessageMiddleware(AgentMiddleware):
         runtime: Any,
     ) -> dict[str, Any] | None:
         return self.after_agent(state, runtime)
+
 
 class ReportWhenToolsRunOutMiddleware(AgentMiddleware):
     """Turn a spent tool budget into a report instead of an empty run.

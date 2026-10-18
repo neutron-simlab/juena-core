@@ -466,6 +466,7 @@ async def test_checkpointed_execution_history_is_filtered_on_real_consecutive_tu
     assert "failed (exit 9)" in second["messages"][-1].text
     assert "completed (exit 0)" not in second["messages"][-1].text
 
+
 class _ToolHungryModel(FakeMessagesListChatModel):
     """Calls `lookup_value` whenever it is offered, like a model that keeps
     researching; it can only report when no other tool is bound."""
@@ -521,3 +522,62 @@ def test_a_spent_tool_budget_ends_in_a_report_not_an_empty_run() -> None:
     assert "STATUS: VERIFIED" in final
     assert "The value is 17." in final
 
+
+def _lookup_call(n: int) -> AIMessage:
+    return AIMessage(content="", tool_calls=[{"name": "lookup_value", "args": {}, "id": f"lookup-{n}"}])
+
+
+def _filed_specialist(model):
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+
+    from juena_core.agents.specialist_runtime import build_specialist_backend
+
+    return _specialist_agent(model, FilesystemMiddleware(backend=build_specialist_backend()))
+
+
+def test_a_researched_report_is_saved_to_findings_for_the_next_task() -> None:
+    """Whether a finding existed used to rest on the supervisor asking; after long
+    research it often did not. The server now keeps the report itself."""
+    model = _ScriptedModel(responses=[*[_lookup_call(n) for n in range(3)], _report_call()])
+
+    result = _filed_specialist(model).invoke(
+        {"messages": [HumanMessage(content="Find the value.")], "files": {}}
+    )
+
+    note = result["files"]["/findings/the-value-is-17.md"]["content"]
+    assert note.startswith("# The value is 17.")
+    assert "the server did not verify it" in note
+    assert "Status: completed" in note
+    assert "## Objective\n\nFind the value." in note
+    assert "## Evidence\n\n- Direct evidence" in note
+    assert "Report saved for later work: /findings/the-value-is-17.md" in result["messages"][-1].content
+
+
+def test_a_short_lookup_or_a_note_the_specialist_wrote_is_not_copied() -> None:
+    short = _ScriptedModel(responses=[_lookup_call(0), _report_call()])
+    wrote_own = _ScriptedModel(responses=[
+        *[_lookup_call(n) for n in range(3)],
+        AIMessage(content="", tool_calls=[{
+            "name": "write_file", "id": "note",
+            "args": {"file_path": "/findings/value.md", "content": "The value is 17."},
+        }]),
+        _report_call(),
+    ])
+
+    for model, expected in ((short, set()), (wrote_own, {"/findings/value.md"})):
+        result = _filed_specialist(model).invoke(
+            {"messages": [HumanMessage(content="Find the value.")], "files": {}}
+        )
+        assert {p for p in result["files"] if p.startswith("/findings/")} == expected
+        assert "Report saved for later work" not in result["messages"][-1].content
+
+
+def test_the_saved_report_crosses_back_to_the_supervisor() -> None:
+    from juena_core.agents.delegation import SpecialistDelegate
+
+    model = _ScriptedModel(responses=[*[_lookup_call(n) for n in range(3)], _report_call()])
+    delegate = SpecialistDelegate(_filed_specialist(model), name="specialist")
+
+    returned = delegate.invoke({"messages": [HumanMessage(content="Find the value.")], "files": {}})
+
+    assert list(returned["files"]) == ["/findings/the-value-is-17.md"]
