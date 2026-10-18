@@ -175,7 +175,7 @@ def test_unhashable_override_skips_the_model_cache(monkeypatch) -> None:
 
 
 def test_available_model_filter_keeps_only_known_models(monkeypatch) -> None:
-    selected = BlabladorModelName.MINIMAX_M27.value
+    selected = BlabladorModelName.MIMO_V26_PRO.value
     config = make_settings(BLABLADOR_AVAILABLE_MODELS=f"unknown, {selected}")
     monkeypatch.setattr(providers, "settings", lambda: config)
 

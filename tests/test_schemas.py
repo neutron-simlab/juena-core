@@ -38,8 +38,8 @@ def test_model_catalogue_preserves_curated_blablador_models() -> None:
         == BlabladorModelName.QWEN38_FLASH_NEXT_JUWELS.value
     )
     assert (
-        get_blablador_model_display_name(BlabladorModelName.MINIMAX_M27.value)
-        == "MiniMax-M2.7"
+        get_blablador_model_display_name(BlabladorModelName.DEEPSEEK_V41_FLASH_HZDR.value)
+        == "DeepSeek-V4.1-Flash (HZDR)"
     )
 
 
