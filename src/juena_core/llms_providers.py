@@ -12,10 +12,12 @@ from typing import Any
 
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
+from langchain_core.rate_limiters import InMemoryRateLimiter
 
 from juena_core.config import settings
 from juena_core.schema.llm_models import (
     BLABLADOR_MAX_MODEL_LEN,
+    BLABLADOR_REQUESTS_PER_SECOND,
     Provider,
     get_default_model_for_provider,
     get_models_for_provider,
@@ -77,6 +79,9 @@ def _model_kwargs(
             kwargs["profile"] = {
                 "max_input_tokens": context_window - kwargs["max_tokens"]
             }
+        requests_per_second = BLABLADOR_REQUESTS_PER_SECOND.get(model)
+        if requests_per_second is not None:
+            kwargs["rate_limiter"] = _rate_limiter(model, requests_per_second)
     else:
         kwargs["api_key"] = config.OPENAI_API_KEY
 
@@ -88,6 +93,17 @@ def _model_kwargs(
             kwargs["stream_usage"] = True
 
     return kwargs
+
+
+# One limiter per rate-limited model, shared by every client of that model in
+# this process. Separate processes or replicas each pace on their own.
+_RATE_LIMITERS: dict[str, InMemoryRateLimiter] = {}
+
+
+def _rate_limiter(model: str, requests_per_second: float) -> InMemoryRateLimiter:
+    return _RATE_LIMITERS.setdefault(
+        model, InMemoryRateLimiter(requests_per_second=requests_per_second)
+    )
 
 
 def same_model(first: Any, second: Any) -> bool:

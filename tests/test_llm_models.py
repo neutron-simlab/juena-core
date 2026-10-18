@@ -19,6 +19,7 @@ def test_blablador_models_include_minimax() -> None:
     assert BlabladorModelName.MINIMAX_M27.value in models
     assert BlabladorModelName.QWEN35_122B.value in models
     assert BlabladorModelName.DEEPSEEK_V41_FLASH_JUWELS.value in models
+    assert BlabladorModelName.DEEPSEEK_V41_FLASH_HZDR.value in models
 
 
 def test_blablador_display_name_for_minimax() -> None:
@@ -49,6 +50,7 @@ def test_blablador_display_names_hide_provider_ranking_prefixes() -> None:
         "MiniMax-M2.7",
         "QWEN3.5-122B",
         "DeepSeek-V4.1-Flash (JUWELS)",
+        "DeepSeek-V4.1-Flash (HZDR)",
     ]
     assert all(not label[:1].isdigit() for label in labels)
 

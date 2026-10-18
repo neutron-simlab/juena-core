@@ -12,6 +12,7 @@ __all__ = [
     "AllModelEnum",
     "BLABLADOR_MAX_MODEL_LEN",
     "BLABLADOR_MODEL_DISPLAY_NAMES",
+    "BLABLADOR_REQUESTS_PER_SECOND",
     "get_blablador_model_display_name",
     "PROVIDER_MODELS",
     "get_models_for_provider",
@@ -47,6 +48,7 @@ class BlabladorModelName(StrEnum):
     MINIMAX_M27 = "01 - MiniMax-M2.7 - our best model as of April, 2026"
     QWEN35_122B = "02 - Qwen3.5-122B-A10B-FP8, general purpose large model"
     DEEPSEEK_V41_FLASH_JUWELS = "15 - DeepSeek-V4.1-Flash on JUWELS Booster"
+    DEEPSEEK_V41_FLASH_HZDR = "deepseek-v4.1-flash-at-hzdr"
 
 
 # Measured from the provider's /v1/models endpoint; the selected Qwen and MiMo
@@ -62,6 +64,9 @@ BLABLADOR_MAX_MODEL_LEN: dict[str, int] = {
     BlabladorModelName.QWEN35_122B.value: 262_144,
     # Verified on /v1/models on 2026-10-15.
     BlabladorModelName.DEEPSEEK_V41_FLASH_JUWELS.value: 1_048_576,
+    # /v1/models reports no length for it; a 900,043-token prompt was accepted
+    # on 2026-10-18, so this is a verified lower bound.
+    BlabladorModelName.DEEPSEEK_V41_FLASH_HZDR.value: 900_000,
 }
 
 BLABLADOR_MODEL_DISPLAY_NAMES: dict[str, str] = {
@@ -72,6 +77,14 @@ BLABLADOR_MODEL_DISPLAY_NAMES: dict[str, str] = {
     BlabladorModelName.MINIMAX_M27.value: "MiniMax-M2.7",
     BlabladorModelName.QWEN35_122B.value: "QWEN3.5-122B",
     BlabladorModelName.DEEPSEEK_V41_FLASH_JUWELS.value: "DeepSeek-V4.1-Flash (JUWELS)",
+    BlabladorModelName.DEEPSEEK_V41_FLASH_HZDR.value: "DeepSeek-V4.1-Flash (HZDR)",
+}
+
+# BlaBlaDor answers 429 after about 30 requests a minute to these models
+# (measured 2026-10-17; other models were unaffected), so clients pace
+# their requests below that.
+BLABLADOR_REQUESTS_PER_SECOND: dict[str, float] = {
+    BlabladorModelName.DEEPSEEK_V41_FLASH_HZDR.value: 0.45,
 }
 
 

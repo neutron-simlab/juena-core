@@ -105,6 +105,33 @@ def test_juwels_qwen_profile_reserves_output_within_served_context(monkeypatch) 
     assert kwargs["profile"] == {"max_input_tokens": 907_232}
 
 
+def test_rate_limited_model_shares_one_pacer_across_clients(monkeypatch) -> None:
+    """BlaBlaDor refuses more than about 30 HZDR requests a minute. Every client
+    of that model must wait on the same limiter, whatever its other settings."""
+    from langchain_core.rate_limiters import InMemoryRateLimiter
+
+    monkeypatch.setattr(providers, "settings", make_settings)
+    providers._build_cached.cache_clear()
+    hzdr = BlabladorModelName.DEEPSEEK_V41_FLASH_HZDR.value
+    try:
+        specialist = providers.build_chat_model(
+            provider="blablador", model=hzdr, max_tokens=32_768, streaming=True, max_retries=0
+        )
+        supervisor = providers.build_chat_model(provider="blablador", model=hzdr)
+        juwels = providers.build_chat_model(
+            provider="blablador", model=BlabladorModelName.DEEPSEEK_V41_FLASH_JUWELS.value
+        )
+    finally:
+        providers._build_cached.cache_clear()
+
+    assert specialist is not supervisor
+    assert isinstance(specialist.rate_limiter, InMemoryRateLimiter)
+    assert specialist.rate_limiter is supervisor.rate_limiter
+    assert specialist.rate_limiter.requests_per_second == 0.45
+    assert juwels.rate_limiter is None
+    assert specialist.profile["max_input_tokens"] == 900_000 - 32_768
+
+
 def test_build_chat_model_reuses_hashable_constructions(monkeypatch) -> None:
     config = make_settings()
     built: list[tuple[object, ...]] = []
