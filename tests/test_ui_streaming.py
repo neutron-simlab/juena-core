@@ -22,13 +22,19 @@ including the clarification twin of
 ``test_failed_resume_reopens_the_command_for_another_click``.
 """
 
+import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from juena_core.clients.base import AgentClientError
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+
+from juena_core.clients.base import AgentClientError, BaseAgentClient
 from juena_core.schema.interrupts import CLARIFICATION_KIND
 from juena_core.schema.server import ChatMessage
+from juena_core.server.streaming.processor import StreamEventProcessor
 from juena_core.ui import streaming
+from juena_core.ui.components import activity_line, activity_summary
 
 #: The kind juena-chatbot registers. Core names none of its own, so any test
 #: that wants an approval card has to say which one it is rendering.
@@ -70,13 +76,23 @@ class _DummyContext:
         return False
 
 
+class _FakeSlot:
+    """Stand-in for st.empty(): it shows only the last thing drawn into it."""
+
+    def __init__(self) -> None:
+        self.text = ""
+
+    def markdown(self, text):
+        self.text = text
+
+
 class _FakeStatus:
     """Stand-in for the st.status container used during streaming."""
 
     def __init__(self):
         self.labels: list[str] = []
-        self.writes: list[str] = []
         self.state: str | None = None
+        self.slots: list[_FakeSlot] = []
 
     def __enter__(self):
         return self
@@ -90,8 +106,39 @@ class _FakeStatus:
         if state is not None:
             self.state = state
 
-    def write(self, text):
-        self.writes.append(text)
+    def empty(self):
+        self.slots.append(_FakeSlot())
+        return self.slots[-1]
+
+    @property
+    def lines(self) -> list[str]:
+        """What the box shows: one line per slot, as last drawn."""
+        return [slot.text for slot in self.slots]
+
+
+def _server_chunks(*messages: BaseMessage, from_subagent: bool = False) -> list[dict]:
+    """Status chunks for *messages*, as the server streams and the client parses them.
+
+    Built by the real processor and client, so a key one side writes and the
+    other drops fails here rather than in a browser.
+    """
+    processor = StreamEventProcessor(
+        agent=object(), config={}, run_id="run-1", user_input_message="hello"
+    )
+    node_path = ("tools:task-1",) if from_subagent else ()
+
+    async def collect() -> list[dict]:
+        event = (node_path, "updates", {"node": {"messages": list(messages)}})
+        return [payload async for payload in processor.process_event(event)]
+
+    return [BaseAgentClient._parse_sse_data(None, json.dumps(p)) for p in asyncio.run(collect())]
+
+
+def _call(name: str, args: dict, call_id: str) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}],
+    )
 
 
 class _ButtonColumn:
@@ -268,7 +315,7 @@ def test_stream_and_display_response_token_only_completion_uses_finalize_rendere
     finalize_mock = Mock()
     render_streaming_token_mock = Mock()
     rerun_mock = Mock()
-    message_placeholder = Mock()
+    answer = Mock()
     session_state = _SessionState(
         client=_FakeTokenClient([{"type": "token", "content": "Hello"}]),
         thread_id="thread-1",
@@ -282,6 +329,7 @@ def test_stream_and_display_response_token_only_completion_uses_finalize_rendere
         rerun=rerun_mock,
         error=Mock(),
         status=lambda *a, **k: _FakeStatus(),
+        empty=lambda: answer,
     )
 
     monkeypatch.setattr(streaming, "st", fake_st)
@@ -290,13 +338,13 @@ def test_stream_and_display_response_token_only_completion_uses_finalize_rendere
 
     streaming.stream_and_display_response(
         "hello",
-        message_placeholder,
+        _FakePlaceholder(),
         should_rerun=False,
     )
 
-    finalize_mock.assert_called_once_with(message_placeholder, "Hello")
-    render_streaming_token_mock.assert_called_once_with("Hello", message_placeholder)
-    message_placeholder.markdown.assert_not_called()
+    finalize_mock.assert_called_once_with(answer, "Hello")
+    render_streaming_token_mock.assert_called_once_with("Hello", answer)
+    answer.markdown.assert_not_called()
     rerun_mock.assert_not_called()
     assert len(session_state.messages) == 1
     assert session_state.messages[0].type == "ai"
@@ -308,7 +356,7 @@ def test_stream_and_display_response_token_only_math_completion_keeps_raw_text(
 ) -> None:
     finalize_mock = Mock()
     render_streaming_token_mock = Mock()
-    message_placeholder = Mock()
+    answer = Mock()
     session_state = _SessionState(
         client=_FakeTokenClient(
             [
@@ -327,6 +375,7 @@ def test_stream_and_display_response_token_only_math_completion_keeps_raw_text(
         rerun=Mock(),
         error=Mock(),
         status=lambda *a, **k: _FakeStatus(),
+        empty=lambda: answer,
     )
 
     monkeypatch.setattr(streaming, "st", fake_st)
@@ -335,15 +384,15 @@ def test_stream_and_display_response_token_only_math_completion_keeps_raw_text(
 
     streaming.stream_and_display_response(
         "hello",
-        message_placeholder,
+        _FakePlaceholder(),
         should_rerun=False,
     )
 
     assert [call.args for call in render_streaming_token_mock.call_args_list] == [
-        (r"Equation: \(", message_placeholder),
-        (r"Equation: \(a+b\)", message_placeholder),
+        (r"Equation: \(", answer),
+        (r"Equation: \(a+b\)", answer),
     ]
-    finalize_mock.assert_called_once_with(message_placeholder, r"Equation: \(a+b\)")
+    finalize_mock.assert_called_once_with(answer, r"Equation: \(a+b\)")
     assert session_state.messages[0].content == r"Equation: \(a+b\)"
 
 
@@ -707,7 +756,7 @@ def test_server_error_cannot_finish_with_done(monkeypatch) -> None:
     )
     error = Mock()
     monkeypatch.setattr(streaming, "st", SimpleNamespace(
-        session_state=state, error=error, status=lambda *a, **k: status,
+        session_state=state, error=error, status=lambda *a, **k: status, empty=Mock,
     ))
 
     def chunks():
@@ -715,7 +764,7 @@ def test_server_error_cannot_finish_with_done(monkeypatch) -> None:
             None, '{"type":"error","content":"This turn is paused"}',
         )
 
-    streaming._stream_and_display_chunks(chunks(), Mock(), should_rerun=False)
+    streaming._stream_and_display_chunks(chunks(), _FakePlaceholder(), should_rerun=False)
     assert "Done" not in status.labels
     assert "paused" in error.call_args.args[0]
     assert state.approval_checked_threads == set()
@@ -726,72 +775,166 @@ def test_server_error_cannot_finish_with_done(monkeypatch) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_tool_activity_is_logged_inside_the_status_container() -> None:
-    """Tool activity belongs in the collapsible status, not the transcript."""
+def test_a_tool_call_is_one_line_marked_finished_in_place() -> None:
+    """The line appears when the model calls the tool; its result redraws it."""
     status = _FakeStatus()
+    activity = streaming.ActivityLog(status)
 
-    streaming.apply_status_chunk(
-        status,
-        {
-            "type": "status",
-            "phase": "tool",
-            "label": "Ran search_code_semantic",
-            "tool": "search_code_semantic",
-            "summary": "12 hits",
-        },
-    )
+    for chunk in _server_chunks(
+        _call("read_file", {"file_path": "/inputs/a.dat"}, "c1"), from_subagent=True
+    ):
+        streaming.apply_status_chunk(activity, chunk)
+    assert activity.steps == [
+        {"id": "c1", "label": "Read `/inputs/a.dat`", "state": "running", "nested": True}
+    ]
 
-    assert status.writes == ["🔧 `search_code_semantic` — 12 hits"]
+    for chunk in _server_chunks(
+        ToolMessage(content="x" * 5000, tool_call_id="c1", name="read_file"),
+        from_subagent=True,
+    ):
+        streaming.apply_status_chunk(activity, chunk)
+
+    assert activity.steps[0]["state"] == "done"
+    assert status.lines == [activity_line(activity.steps[0])]
+    assert "xxx" not in status.lines[0]
     assert status.labels == []
+
+
+def test_a_failed_tool_call_is_marked_failed() -> None:
+    status = _FakeStatus()
+    activity = streaming.ActivityLog(status)
+
+    for chunk in _server_chunks(
+        _call("execute", {"command": "python fit.py"}, "c1"),
+        ToolMessage(
+            content="Traceback", tool_call_id="c1", name="execute", artifact={"exit_code": 1}
+        ),
+    ):
+        streaming.apply_status_chunk(activity, chunk)
+
+    assert [step["state"] for step in activity.steps] == ["failed"]
 
 
 def test_status_relabels_and_completes() -> None:
     status = _FakeStatus()
+    activity = streaming.ActivityLog(status)
 
     streaming.apply_status_chunk(
-        status, {"type": "status", "phase": "researching", "label": "Researching…"}
+        activity, {"type": "status", "phase": "researching", "label": "Researching…"}
     )
     assert status.labels == ["Researching…"]
     assert status.state is None
 
     # The first answer token collapses the activity log.
-    streaming.apply_status_chunk(status, {"type": "status", "phase": "done", "label": ""})
+    streaming.apply_status_chunk(activity, {"type": "status", "phase": "done", "label": ""})
     assert status.state == "complete"
+
+
+def test_a_tool_call_after_the_answer_began_reopens_the_box() -> None:
+    """A model can write a sentence and then reach for a tool; "Done" would be false."""
+    status = _FakeStatus()
+    activity = streaming.ActivityLog(status)
+    streaming.apply_status_chunk(activity, {"type": "status", "phase": "done", "label": ""})
+
+    for chunk in _server_chunks(_call("ls", {"path": "/workspace"}, "c1")):
+        streaming.apply_status_chunk(activity, chunk)
+
+    assert status.state == "running"
+    assert status.labels[-1] == "Working…"
+
+
+def _streaming_st(monkeypatch, chunks: list, status: _FakeStatus) -> _SessionState:
+    """Point the module at fakes that stream *chunks* into *status*."""
+    session_state = _SessionState(
+        client=_FakeTokenClient(chunks),
+        thread_id="thread-1",
+        selected_provider="openai",
+        selected_model="gpt-4o-mini",
+        messages=[],
+    )
+    monkeypatch.setattr(streaming, "st", SimpleNamespace(
+        session_state=session_state,
+        rerun=Mock(),
+        error=Mock(),
+        status=lambda *a, **k: status,
+        empty=Mock,
+    ))
+    monkeypatch.setattr(streaming, "finalize_streaming_message", Mock())
+    monkeypatch.setattr(streaming, "render_streaming_token", Mock())
+    return session_state
 
 
 def test_stream_routes_status_chunks_away_from_response_text(monkeypatch) -> None:
     """A status event must never be accumulated into the answer."""
     status = _FakeStatus()
-    finalize_mock = Mock()
-    session_state = _SessionState(
-        client=_FakeTokenClient(
-            [
-                {"type": "status", "phase": "researching", "label": "Researching…"},
-                {"type": "status", "phase": "tool", "tool": "grep", "summary": "3 hits"},
-                {"type": "token", "content": "Answer"},
-            ]
+    session_state = _streaming_st(monkeypatch, [
+        {"type": "status", "phase": "researching", "label": "Researching…"},
+        *_server_chunks(
+            _call("grep", {"pattern": "leastsq"}, "c1"),
+            ToolMessage(content="3 hits", tool_call_id="c1", name="grep"),
         ),
-        thread_id="thread-1",
-        user_id="user-1",
-        selected_provider="openai",
-        selected_model="gpt-4o-mini",
-        messages=[],
-    )
-    fake_st = SimpleNamespace(
-        session_state=session_state,
-        rerun=Mock(),
-        error=Mock(),
-        status=lambda *a, **k: status,
-    )
+        {"type": "token", "content": "Answer"},
+    ], status)
 
-    monkeypatch.setattr(streaming, "st", fake_st)
-    monkeypatch.setattr(streaming, "finalize_streaming_message", finalize_mock)
-    monkeypatch.setattr(streaming, "render_streaming_token", Mock())
-
-    streaming.stream_and_display_response("hi", Mock(), should_rerun=False)
+    streaming.stream_and_display_response("hi", _FakePlaceholder(), should_rerun=False)
 
     # Only the token text became the answer; the status events did not.
     assert len(session_state.messages) == 1
     assert session_state.messages[0].content == "Answer"
     assert "Researching…" in status.labels
-    assert status.writes == ["🔧 `grep` — 3 hits"]
+    assert len(status.lines) == 1
+    assert status.lines[0].endswith("Search files for `leastsq`")
+
+
+def test_a_finished_turn_keeps_its_steps_on_the_answer(monkeypatch) -> None:
+    """The box is gone after the rerun; the transcript redraws the log from here."""
+    status = _FakeStatus()
+    session_state = _streaming_st(monkeypatch, [
+        *_server_chunks(
+            _call("ls", {"path": "/workspace"}, "c1"),
+            ToolMessage(content="a.dat", tool_call_id="c1", name="ls"),
+        ),
+        {"type": "token", "content": "Answer"},
+    ], status)
+
+    streaming.stream_and_display_response("hi", _FakePlaceholder(), should_rerun=False)
+
+    activity = session_state.messages[0].custom_data["activity"]
+    assert [(step["label"], step["state"]) for step in activity["steps"]] == [
+        ("List `/workspace`", "done")
+    ]
+    assert status.labels[-1] == activity_summary(activity)
+    assert status.state == "complete"
+
+
+def test_a_paused_turn_resumes_with_its_steps(monkeypatch) -> None:
+    """Steps before a question and after its answer read as one turn."""
+    first = _FakeStatus()
+    session_state = _streaming_st(monkeypatch, [
+        *_server_chunks(_call("ask_user", {"question": "Which model?"}, "q1")),
+        {"type": "clarification_required", "interrupt_id": "pause", "question": "Which model?"},
+    ], first)
+
+    streaming.stream_and_display_response("hi", _FakePlaceholder(), should_rerun=False)
+
+    paused = session_state.pending_activity["thread-1"]
+    assert [step["state"] for step in paused["steps"]] == ["running"]
+    assert session_state.messages == []
+
+    second = _FakeStatus()
+    streaming.st.status = lambda *a, **k: second
+    resumed = [
+        # A resumed graph can announce the call it paused on once more.
+        *_server_chunks(_call("ask_user", {"question": "Which model?"}, "q1")),
+        *_server_chunks(ToolMessage(content="model A", tool_call_id="q1", name="ask_user")),
+        {"type": "token", "content": "Using model A."},
+    ]
+    streaming._stream_and_display_chunks(iter(resumed), _FakePlaceholder(), should_rerun=False)
+
+    assert session_state.pending_activity == {}
+    assert len(second.lines) == 1
+    activity = session_state.messages[0].custom_data["activity"]
+    assert [(step["label"], step["state"]) for step in activity["steps"]] == [
+        ("Question for you: “Which model?”", "done")
+    ]
+    assert activity["seconds"] >= paused["seconds"]

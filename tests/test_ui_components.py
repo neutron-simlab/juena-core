@@ -453,3 +453,50 @@ def test_render_artifacts_keeps_unidentified_files_apart(monkeypatch, explorer_m
     assert len(keys) == 2
     assert len(set(keys)) == 2
     expander_mock.assert_called_once_with("Generated files (2 files)", expanded=False)
+
+
+def test_a_finished_turn_shows_its_steps_collapsed_above_the_answer(monkeypatch) -> None:
+    drawn: list[tuple] = []
+    fake_st = SimpleNamespace(
+        chat_message=lambda _role: _DummyContext(),
+        expander=lambda label, **kwargs: drawn.append(("expander", label, kwargs)) or _DummyContext(),
+        markdown=lambda text: drawn.append(("markdown", text)),
+        json=Mock(),
+    )
+    monkeypatch.setattr(ui_components, "st", fake_st)
+    activity = {
+        "seconds": 83.4,
+        "steps": [
+            {"id": "c1", "label": "Ask the software specialist", "state": "done", "nested": False},
+            {"id": "c2", "label": "Run `python fit.py`", "state": "failed", "nested": True},
+            {"id": None, "label": "Sandbox command timed out", "state": None, "nested": False},
+        ],
+    }
+
+    ui_components.render_message(
+        ChatMessage(type="ai", content="The fit timed out.", custom_data={"activity": activity})
+    )
+
+    # A note is shown but is not a step.
+    assert drawn[0] == (
+        "expander",
+        "Worked for 1 min 23 s · 2 steps",
+        {"icon": ":material/check:", "expanded": False},
+    )
+    assert drawn[1:] == [
+        ("markdown", ":green[:material/check_circle:] Ask the software specialist"),
+        ("markdown", "↳ :red[:material/cancel:] Run `python fit.py`"),
+        ("markdown", "Sandbox command timed out"),
+        ("markdown", "The fit timed out."),
+    ]
+
+
+def test_a_chat_loaded_from_the_server_shows_no_log(monkeypatch) -> None:
+    expander = Mock()
+    monkeypatch.setattr(ui_components, "st", SimpleNamespace(
+        chat_message=lambda _role: _DummyContext(), expander=expander, markdown=Mock(), json=Mock(),
+    ))
+
+    ui_components.render_message(ChatMessage(type="ai", content="Hello"))
+
+    expander.assert_not_called()

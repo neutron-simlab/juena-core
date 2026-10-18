@@ -319,7 +319,8 @@ async def test_v2_custom_stream_accepts_only_sandbox_status() -> None:
 @pytest.mark.asyncio
 async def test_tool_results_become_status_not_transcript_payloads() -> None:
     """Tool payloads are large and the model has already read them; rendering
-    them in the transcript buries the answer."""
+    them in the transcript buries the answer. The status says only which call
+    finished and whether it worked."""
     tool_message = ToolMessage(
         content="x" * 5000, tool_call_id="call-1", name="search_code_semantic", id="t-1"
     )
@@ -330,7 +331,9 @@ async def test_tool_results_become_status_not_transcript_payloads() -> None:
     assert [p["type"] for p in payloads] == ["status"]
     assert payloads[0]["phase"] == events.PHASE_TOOL
     assert payloads[0]["tool"] == "search_code_semantic"
-    assert len(payloads[0]["summary"]) < 200
+    assert payloads[0]["tool_call_id"] == "call-1"
+    assert payloads[0]["failed"] is False
+    assert "xxx" not in str(payloads)
 
 
 @pytest.mark.asyncio
@@ -347,6 +350,7 @@ async def test_tool_payloads_can_be_enabled_for_debugging() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_tool_output_is_never_streamed_or_previewed() -> None:
+    """A silent tool's step is listed; its output is not, even with payloads on."""
     tool_message = ToolMessage(
         content="data:image/png;base64," + "x" * 5000,
         tool_call_id="c1",
@@ -362,7 +366,8 @@ async def test_execute_tool_output_is_never_streamed_or_previewed() -> None:
         (("model",), "updates", {"tools": {"messages": [tool_message]}}),
     )
 
-    assert payloads == []
+    assert [(p["type"], p["phase"]) for p in payloads] == [("status", events.PHASE_TOOL)]
+    assert "base64" not in str(payloads)
 
 
 # --------------------------------------------------------------------------
@@ -383,6 +388,7 @@ async def test_duplicate_message_ids_are_sent_once() -> None:
 
 @pytest.mark.asyncio
 async def test_user_echo_and_empty_tool_call_messages_are_dropped() -> None:
+    """Neither reaches the transcript; the tool call is announced as activity."""
     echo = HumanMessage(content="hello", id="h-1")
     tool_call_only = AIMessage(
         content="",
@@ -393,7 +399,30 @@ async def test_user_echo_and_empty_tool_call_messages_are_dropped() -> None:
         _processor(), (("model",), "updates", {"agent": {"messages": [echo, tool_call_only]}})
     )
 
-    assert payloads == []
+    assert [(p["type"], p["phase"]) for p in payloads] == [("status", events.PHASE_TOOL_CALL)]
+    assert payloads[0]["tool_call_id"] == "c1"
+
+
+@pytest.mark.asyncio
+async def test_an_application_words_its_own_tool_calls() -> None:
+    call = AIMessage(
+        content="",
+        id="a-1",
+        tool_calls=[
+            {"name": "search_web", "args": {"query": "FRM II flux"}, "id": "c1", "type": "tool_call"},
+            {"name": "unknown_tool", "args": {"topic": "SANS"}, "id": "c2", "type": "tool_call"},
+        ],
+    )
+    policy = StreamPolicy(tool_labels={"search_web": lambda args: f"Search the web for {args['query']}"})
+
+    payloads = await _collect(
+        _processor(policy=policy), (("model",), "updates", {"model": {"messages": [call]}})
+    )
+
+    assert [p["label"] for p in payloads] == [
+        "Search the web for FRM II flux",
+        "unknown_tool(SANS)",
+    ]
 
 
 @pytest.mark.asyncio
@@ -550,6 +579,85 @@ async def test_specialist_report_reminder_is_not_shown_as_a_user_message() -> No
     shown = [str(p.get("content")) for p in payloads if p["type"] == "message"]
     assert shown, "the supervisor's answer should still be streamed"
     assert all(REPORT_REMINDER not in text for text in shown)
+
+
+@pytest.mark.asyncio
+async def test_a_real_turn_lists_each_step_and_how_it_ended() -> None:
+    """Driven through a real supervisor, specialist and deepagents ``execute``.
+
+    The failing command needs the real tool: ``execute`` reports a non-zero
+    exit as an ordinary result, with the code only in ``artifact``.
+    """
+    from deepagents.backends import StateBackend
+    from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+    from deepagents.middleware.subagents import SubAgentMiddleware
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    class _Model(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ANN003
+            return self
+
+    class _FailingSandbox(StateBackend, SandboxBackendProtocol):
+        @property
+        def id(self) -> str:
+            return "sandbox"
+
+        def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+            return ExecuteResponse(output="Traceback: fit did not converge", exit_code=1)
+
+    def call(name: str, args: dict, call_id: str) -> AIMessage:
+        return AIMessage(
+            content="",
+            tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}],
+        )
+
+    specialist = create_agent(
+        model=_Model(responses=[
+            call("execute", {"command": "python fit.py"}, "run"),
+            AIMessage(content="It failed."),
+        ]),
+        tools=[],
+        middleware=[FilesystemMiddleware(backend=_FailingSandbox())],
+        name="software-specialist",
+    )
+    supervisor = create_agent(
+        model=_Model(responses=[
+            call("task", {"description": "Fit the curve", "subagent_type": "software-specialist"}, "ask"),
+            AIMessage(content="The fit failed."),
+        ]),
+        tools=[],
+        middleware=[SubAgentMiddleware(
+            backend=StateBackend(),
+            subagents=[{"name": "software-specialist", "description": "d", "runnable": specialist}],
+        )],
+        checkpointer=InMemorySaver(),
+    )
+
+    processor = _processor(policy=StreamPolicy(silent_tools=frozenset({"execute"})))
+    payloads = []
+    async for node_path, mode, event in supervisor.astream(
+        {"messages": [{"role": "user", "content": "hello"}]},
+        config={"configurable": {"thread_id": "t"}},
+        stream_mode=["updates"],
+        subgraphs=True,
+    ):
+        payloads += await _collect(processor, (tuple(node_path), mode, event))
+
+    steps = [
+        (p["phase"], p["tool_call_id"], p["label"], p.get("failed"), p["from_subagent"])
+        for p in payloads
+        if p["type"] == "status"
+    ]
+    assert steps == [
+        ("tool_call", "ask", "Ask the software specialist: “Fit the curve”", None, False),
+        ("tool_call", "run", "Run `python fit.py`", None, True),
+        ("tool", "run", "Ran execute", True, True),
+        ("tool", "ask", "Ran task", False, False),
+    ]
+    assert "Traceback" not in str(payloads)
 
 
 @pytest.mark.asyncio

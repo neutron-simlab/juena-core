@@ -40,6 +40,7 @@ def test_session_state_contract_is_explicit() -> None:
         "pending_approvals",
         "approval_checked_threads",
         "filesystem_refresh",
+        "pending_activity",
     )
 
 
@@ -297,9 +298,9 @@ def test_turn_completion_and_approval_pause_refresh_only_the_current_files(chunk
     from unittest.mock import MagicMock
     state = _SessionState(client=Mock(), thread_id="one", messages=[],
                           filesystem_refresh={"one": 3, "two": 9})
-    ui = SimpleNamespace(session_state=state, status=MagicMock(), rerun=Mock())
+    ui = SimpleNamespace(session_state=state, status=MagicMock(), empty=Mock, rerun=Mock())
     monkeypatch.setattr(streaming, "st", ui)
-    streaming._stream_and_display_chunks(chunks, Mock(), should_rerun=False)
+    streaming._stream_and_display_chunks(chunks, MagicMock(), should_rerun=False)
     assert state.filesystem_refresh == {"one": 4, "two": 9}
     if chunks:
         assert state.pending_approvals["one"] == chunks[0]

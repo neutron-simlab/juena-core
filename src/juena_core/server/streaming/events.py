@@ -8,7 +8,8 @@ Event types on the wire:
 ``thread``   thread id, emitted once before any content
 ``token``    an incremental text chunk of the assistant's answer
 ``message``  a complete message (`ChatMessage` payload)
-``status``   agent activity: thinking / researching / running a tool
+``status``   agent activity: thinking / researching / a tool call made / a tool
+             result back
 ``error``    a failure the client should surface
 
 Two more are raised by a paused graph and built through the interrupt-kind
@@ -26,6 +27,7 @@ from juena_core.schema.server import ChatMessage
 __all__ = [
     "PHASE_THINKING",
     "PHASE_RESEARCHING",
+    "PHASE_TOOL_CALL",
     "PHASE_TOOL",
     "PHASE_DONE",
     "thread_event",
@@ -38,8 +40,12 @@ __all__ = [
 ]
 
 # Phases a client can render. `researching` means a subagent is working.
+# `tool_call` is sent when a model calls a tool and `tool` when the result is
+# back; both carry the call's `tool_call_id`, so a client can show one line per
+# step and mark it finished in place.
 PHASE_THINKING = "thinking"
 PHASE_RESEARCHING = "researching"
+PHASE_TOOL_CALL = "tool_call"
 PHASE_TOOL = "tool"
 PHASE_DONE = "done"
 

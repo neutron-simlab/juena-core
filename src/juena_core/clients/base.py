@@ -388,7 +388,9 @@ class BaseAgentClient:
                 "phase": parsed.get("phase", ""),
                 "label": parsed.get("label", ""),
                 "tool": parsed.get("tool"),
-                "summary": parsed.get("summary"),
+                "tool_call_id": parsed.get("tool_call_id"),
+                "failed": bool(parsed.get("failed")),
+                "from_subagent": bool(parsed.get("from_subagent")),
             }
 
         if parsed_type == "clarification_required":

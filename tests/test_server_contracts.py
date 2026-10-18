@@ -480,18 +480,23 @@ async def test_a_tool_result_becomes_a_status_event() -> None:
             "phase": "tool",
             "label": "Ran search",
             "tool": "search",
-            "summary": "42 rows",
+            "tool_call_id": "c-1",
+            "failed": False,
+            "from_subagent": False,
         }
     ]
 
 
 @pytest.mark.asyncio
-async def test_a_silent_tool_produces_nothing_at_all() -> None:
-    """Not even the one-line preview: its output may be huge or binary-like."""
+async def test_a_silent_tool_shows_its_step_and_none_of_its_output() -> None:
+    """Its output may be huge or binary-like; that the step finished is not."""
 
     message = ToolMessage(content="\x00" * 5000, tool_call_id="c-2", name="execute")
     processor = _processor(silent_tools=frozenset({"execute"}))
-    assert await _collect(processor, ("updates", {"tools": {"messages": [message]}})) == []
+    payloads = await _collect(processor, ("updates", {"tools": {"messages": [message]}}))
+
+    assert [(p["phase"], p["tool_call_id"]) for p in payloads] == [("tool", "c-2")]
+    assert "\x00" not in str(payloads)
 
 
 # --------------------------------------------------------------------------
