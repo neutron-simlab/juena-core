@@ -480,18 +480,23 @@ async def test_a_tool_result_becomes_a_status_event() -> None:
             "phase": "tool",
             "label": "Ran search",
             "tool": "search",
-            "summary": "42 rows",
+            "tool_call_id": "c-1",
+            "failed": False,
+            "from_subagent": False,
         }
     ]
 
 
 @pytest.mark.asyncio
-async def test_a_silent_tool_produces_nothing_at_all() -> None:
-    """Not even the one-line preview: its output may be huge or binary-like."""
+async def test_a_silent_tool_shows_its_step_and_none_of_its_output() -> None:
+    """Its output may be huge or binary-like; that the step finished is not."""
 
     message = ToolMessage(content="\x00" * 5000, tool_call_id="c-2", name="execute")
     processor = _processor(silent_tools=frozenset({"execute"}))
-    assert await _collect(processor, ("updates", {"tools": {"messages": [message]}})) == []
+    payloads = await _collect(processor, ("updates", {"tools": {"messages": [message]}}))
+
+    assert [(p["phase"], p["tool_call_id"]) for p in payloads] == [("tool", "c-2")]
+    assert "\x00" not in str(payloads)
 
 
 # --------------------------------------------------------------------------
@@ -861,3 +866,23 @@ def test_new_message_cannot_replace_a_paused_turn(configured, monkeypatch, suppo
     after = graph.get_state(config)
     assert after.values == before.values
     assert after.tasks == before.tasks
+
+
+@pytest.mark.parametrize("origin", ["*", "https://*.example", "https://example/path", "null"])
+def test_browser_cors_rejects_nonexplicit_origins(local, origin):
+    with pytest.raises(ValueError, match="explicit HTTP origins"):
+        create_app(principal=local, browser_origins=(origin,))
+
+
+def test_browser_cors_allows_only_configured_credentialed_origin(local):
+    from fastapi.testclient import TestClient
+    client = TestClient(create_app(principal=local, browser_origins=("http://localhost:9501",)))
+    headers = {"Origin": "http://localhost:9501", "Access-Control-Request-Method": "PUT",
+               "Access-Control-Request-Headers": "content-type"}
+    response = client.options("/threads/test/filesystem/file", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:9501"
+    assert response.headers["access-control-allow-credentials"] == "true"
+    response = client.options("/threads/test/filesystem/file", headers={**headers, "Origin": "https://evil.example"})
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers

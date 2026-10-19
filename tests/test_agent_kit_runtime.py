@@ -154,6 +154,27 @@ def _specialist_stack(monkeypatch: pytest.MonkeyPatch, **overrides) -> list:
     )
 
 
+@pytest.mark.parametrize("unattended", [False, True])
+def test_specialists_have_no_model_call_cap_and_report_when_tools_run_out(
+    monkeypatch: pytest.MonkeyPatch, unattended: bool
+) -> None:
+    from juena_core.agents.specialist_outcome import ReportWhenToolsRunOutMiddleware
+
+    stack = _specialist_stack(monkeypatch, unattended=unattended)
+
+    assert "ModelCallLimitMiddleware" not in _names(stack)
+    [report] = [m for m in stack if isinstance(m, ReportWhenToolsRunOutMiddleware)]
+    [tool_limit] = [
+        m for m in stack
+        if type(m).__name__ == "ToolCallLimitMiddleware" and m.tool_name is None
+    ]
+    assert report.tool_call_limit == tool_limit.run_limit == (
+        specialist_runtime.BACKGROUND_TOOL_CALL_LIMIT
+        if unattended
+        else specialist_runtime.SPECIALIST_TOOL_CALL_LIMIT
+    )
+
+
 def test_a_specialist_gets_every_filesystem_tool_unless_it_asks_otherwise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -356,7 +377,9 @@ def test_fallback_model_uses_only_configured_available_provider(
     )
 
     assert len(specialist_runtime.build_fallback_models()) == 1
-    assert built == [{"provider": "openai", "model": "fallback-model"}]
+    assert built == [
+        {"provider": "openai", "model": "fallback-model", "streaming": True, "max_retries": 0}
+    ]
 
 
 def test_explicit_fallback_models_preserve_order(
@@ -380,6 +403,6 @@ def test_explicit_fallback_models_preserve_order(
 
     assert len(fallbacks) == 2
     assert built == [
-        {"provider": "blablador", "model": "mimo-pro"},
-        {"provider": "blablador", "model": "gpt-oss"},
+        {"provider": "blablador", "model": "mimo-pro", "streaming": True, "max_retries": 0},
+        {"provider": "blablador", "model": "gpt-oss", "streaming": True, "max_retries": 0},
     ]

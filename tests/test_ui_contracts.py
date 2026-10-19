@@ -39,6 +39,8 @@ def test_session_state_contract_is_explicit() -> None:
         "selected_provider",
         "pending_approvals",
         "approval_checked_threads",
+        "filesystem_refresh",
+        "pending_activity",
     )
 
 
@@ -289,3 +291,16 @@ def test_failed_clarification_resume_reopens_its_answer_card(
 
     assert state.pending_approvals == {"thread-1": interrupt}
     assert answer_key not in state
+
+
+@pytest.mark.parametrize("chunks", [[], [{"type": "clarification_required", "interrupt_id": "pause"}]])
+def test_turn_completion_and_approval_pause_refresh_only_the_current_files(chunks, monkeypatch):
+    from unittest.mock import MagicMock
+    state = _SessionState(client=Mock(), thread_id="one", messages=[],
+                          filesystem_refresh={"one": 3, "two": 9})
+    ui = SimpleNamespace(session_state=state, status=MagicMock(), empty=Mock, rerun=Mock())
+    monkeypatch.setattr(streaming, "st", ui)
+    streaming._stream_and_display_chunks(chunks, MagicMock(), should_rerun=False)
+    assert state.filesystem_refresh == {"one": 4, "two": 9}
+    if chunks:
+        assert state.pending_approvals["one"] == chunks[0]

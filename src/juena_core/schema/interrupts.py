@@ -33,6 +33,8 @@ class ArtifactRef(BaseModel):
     height: int | None = None
     caption: str
     created_at: datetime
+    category: Literal["result", "record"] = "result"
+    workspace_path: str | None = None
     group_id: str | None = None
     group_label: str | None = None
 

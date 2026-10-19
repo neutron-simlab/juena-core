@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from juena_core.config import settings
+from juena_core.filesystem.service import ConversationFilesystem
 from juena_core.log import get_logger
 from juena_core.schema.server import ChatMessage
 from juena_core.server.database.checkpointer import get_checkpointer
@@ -46,15 +47,24 @@ class ChatNotFoundError(LookupError):
     """Raised for missing chats, and for chats owned by another user or agent."""
 
 
+class ChatDeletedError(ChatNotFoundError):
+    """A retired workspace identity must not be reused by a stale tab."""
+
+
 async def ensure_owned_chat(
     session: AsyncSession,
     user_id: UUID,
     thread_id: str | None,
     agent_id: str,
+    *, filesystem: ConversationFilesystem | None = None,
 ) -> Chat:
     """Create a chat or verify ownership without revealing other users' rows."""
 
     effective_thread_id = thread_id or str(uuid4())
+    if filesystem is not None:
+        files = filesystem.for_thread(str(user_id), effective_thread_id)
+        if files.store.deleted(files.workspace_id):
+            raise ChatDeletedError(effective_thread_id)
     chat = await session.get(Chat, effective_thread_id)
     if chat is None:
         chat = Chat(thread_id=effective_thread_id, user_id=user_id, agent_id=agent_id)

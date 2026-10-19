@@ -207,6 +207,7 @@ def build_inputs_manifest(
     *,
     has_thread_uploads: bool,
     closing_note: str,
+    uploads_prefix: str = UPLOADS_PREFIX,
 ) -> str:
     """Build the short staged-input manifest injected into agent history.
 
@@ -258,4 +259,4 @@ def build_inputs_manifest(
         )
 
     lines.extend(["", closing_note])
-    return "\n".join(lines)
+    return "\n".join(lines).replace("/inputs/uploads/", uploads_prefix)

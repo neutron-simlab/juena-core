@@ -10,4 +10,4 @@ itself. Import the submodule you need.
 
 from __future__ import annotations
 
-__all__ = ["events", "handlers", "processor"]
+__all__ = ["events", "handlers", "processor", "tool_labels"]

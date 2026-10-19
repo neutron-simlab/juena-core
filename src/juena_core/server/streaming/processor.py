@@ -5,18 +5,26 @@ Two rules shape this module:
 1. Only the supervisor's tokens are the answer. A subagent's tokens are its
    internal reasoning; streaming them makes the UI show text that is later
    replaced by the real answer.
-2. Tool results are activity, not transcript. They are large, the model has
-   already read them, and rendering them buries the answer. They become compact
-   ``status`` events unless payloads are explicitly enabled.
+2. Tool calls and results are activity, not transcript. Results are large, the
+   model has already read them, and rendering them buries the answer. Each
+   call becomes one readable ``status`` line when the model makes it, marked
+   finished or failed when its result is back -- never the result itself,
+   unless payloads are explicitly enabled.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import BaseMessage, RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from juena_core.log import get_logger
 from juena_core.server.errors import MessageProcessingError, StreamingError
@@ -28,44 +36,50 @@ from juena_core.server.streaming.handlers import (
     is_subagent_namespace,
     token_text,
 )
+from juena_core.server.streaming.tool_labels import ToolLabel, describe_tool_call
 from juena_core.server.utils import langchain_to_chat_message
 
 logger = get_logger(__name__)
 
 __all__ = ["StreamPolicy", "StreamEventProcessor"]
 
-# Preview length for a tool result shown inside the status container.
-_TOOL_SUMMARY_CHARS = 120
-
 
 @dataclass(frozen=True, slots=True)
 class StreamPolicy:
     """What an application's execution machinery contributes to the stream.
 
-    Both fields name things core cannot know, and both default to empty so a
-    core-only application streams correctly without declaring anything.
+    Every field names things core cannot know, and every one defaults to empty
+    so a core-only application streams correctly without declaring anything.
 
     ``custom_event_types`` is an allowlist, not a filter: the ``custom`` stream
     mode carries whatever any middleware or library chose to write, so
     forwarding by default would put internal payloads on a user's wire.
 
-    ``silent_tools`` are tools whose results never appear, not even as the
-    one-line activity preview. juena-chatbot lists its sandbox ``execute``,
-    which has dedicated bounded status events and whose stdout may be very
-    large or binary-like.
+    ``silent_tools`` are tools whose output never reaches the client, not even
+    when ``STREAM_TOOL_PAYLOADS`` is on for debugging. Their step is still
+    listed in the activity log, as every tool's is, without the output.
+    juena-chatbot lists its sandbox ``execute``, whose stdout may be very large
+    or binary-like.
+
+    ``tool_labels`` describe the application's own tools in the activity log;
+    see :mod:`juena_core.server.streaming.tool_labels`.
     """
 
     custom_event_types: frozenset[str] = field(default_factory=frozenset)
     silent_tools: frozenset[str] = field(default_factory=frozenset)
+    tool_labels: Mapping[str, ToolLabel] = field(default_factory=dict)
 
 
-def _tool_summary(message: ToolMessage) -> str:
-    """One-line gist of a tool result, for the activity log."""
+def _tool_failed(message: ToolMessage) -> bool:
+    """Whether a tool result reports a failure.
 
-    text = " ".join(message.text.split())
-    if len(text) <= _TOOL_SUMMARY_CHARS:
-        return text
-    return text[:_TOOL_SUMMARY_CHARS].rstrip() + "…"
+    deepagents' ``execute`` returns a failing command as an ordinary result
+    and puts the exit code in ``artifact``, so ``status`` alone would show a
+    crashed or timed-out script as a success.
+    """
+
+    artifact = message.artifact if isinstance(message.artifact, dict) else {}
+    return message.status == "error" or artifact.get("exit_code") not in (None, 0)
 
 
 class StreamEventProcessor:
@@ -193,23 +207,36 @@ class StreamEventProcessor:
 
             if isinstance(message, ToolMessage):
                 tool_name = getattr(message, "name", None) or "tool"
-                if tool_name in self.policy.silent_tools:
-                    return
                 yield events.status_event(
                     events.PHASE_TOOL,
                     f"Ran {tool_name}",
                     tool=tool_name,
-                    summary=_tool_summary(message),
+                    tool_call_id=message.tool_call_id,
+                    failed=_tool_failed(message),
+                    from_subagent=from_subagent,
                 )
-                if not self.include_tool_payloads:
+                if not self.include_tool_payloads or tool_name in self.policy.silent_tools:
                     return
+
+            # Announced as the model makes them, before they run, so the
+            # activity log says what is happening rather than what happened.
+            if isinstance(message, AIMessage):
+                for call in message.tool_calls:
+                    yield events.status_event(
+                        events.PHASE_TOOL_CALL,
+                        describe_tool_call(call["name"], call.get("args"), self.policy.tool_labels),
+                        tool=call["name"],
+                        tool_call_id=call.get("id"),
+                        from_subagent=from_subagent,
+                    )
 
             chat_message = langchain_to_chat_message(message)
             chat_message.run_id = str(self.run_id)
 
             # A specialist's final report is input to the supervisor, not an
-            # answer for the user; the supervisor synthesizes from it.
-            if from_subagent and chat_message.type == "ai":
+            # answer for the user; the supervisor synthesizes from it. Human
+            # messages inside a specialist are server reminders, not the user.
+            if from_subagent and chat_message.type in ("ai", "human"):
                 return
 
             # Echo of the user's own turn.

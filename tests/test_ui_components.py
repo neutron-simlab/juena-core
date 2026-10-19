@@ -18,6 +18,7 @@ below.
 """
 
 import base64
+import pytest
 import io
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -188,12 +189,15 @@ def test_render_streaming_token_hides_inline_data_image() -> None:
     placeholder.markdown.assert_called_once_with("Plot:\n\n▌")
 
 
-def test_render_artifacts_displays_plot_and_downloads(monkeypatch) -> None:
+@pytest.mark.parametrize("explorer_mounted", [False, True])
+def test_render_artifacts_displays_plot_and_downloads(monkeypatch, explorer_mounted) -> None:
     html_mock = Mock()
     download_mock = Mock()
     expand_mock = Mock(return_value=False)
     fake_st = SimpleNamespace(
-        session_state=_SessionState(client=Mock()),
+        session_state=_SessionState(
+            client=Mock(), filesystem_scope="session-1" if explorer_mounted else None,
+        ),
         html=html_mock,
         button=expand_mock,
         container=lambda **_kwargs: _DummyContext(),
@@ -231,20 +235,26 @@ def test_render_artifacts_displays_plot_and_downloads(monkeypatch) -> None:
     assert f"max-width:{ui_components.PLOT_PREVIEW_WIDTH_PX}px" in rendered_plot
     assert "Sine wave" in rendered_plot
     assert expand_mock.call_args.kwargs["icon"] == ":material/open_in_full:"
-    assert [call.args[0] for call in download_mock.call_args_list] == [
-        "Download plot.png",
-        "Download analysis.py",
-    ]
+    expected = ["Download plot.png"]
+    if not explorer_mounted:
+        expected.append("Download analysis.py")
+    assert [call.args[0] for call in download_mock.call_args_list] == expected
 
 
-def test_render_artifacts_collapses_each_group_into_one_expander(monkeypatch) -> None:
+@pytest.mark.parametrize(("category", "label"), [
+    ("result", "Simulation proof · narrow"), ("record", "Execution details"),
+])
+@pytest.mark.parametrize("explorer_mounted", [False, True])
+def test_render_artifacts_collapses_each_group_into_one_expander(monkeypatch, category, label, explorer_mounted) -> None:
     download_mock = Mock()
     expander_mock = Mock(return_value=_DummyContext())
     monkeypatch.setattr(
         ui_components,
         "st",
         SimpleNamespace(
-            session_state=_SessionState(client=Mock()),
+            session_state=_SessionState(
+                client=Mock(), filesystem_scope="session-1" if explorer_mounted else None,
+            ),
             expander=expander_mock,
             download_button=download_mock,
             caption=Mock(),
@@ -264,14 +274,20 @@ def test_render_artifacts_collapses_each_group_into_one_expander(monkeypatch) ->
                     "content_base64": encoded,
                     "group_id": "simulation-run-1",
                     "group_label": "Simulation proof · narrow",
+                    "category": category,
                 }
                 for index, filename in enumerate(("monitor1D.dat", "result.txt"))
             ]
         }
     )
 
+    if explorer_mounted and category != "record":
+        expander_mock.assert_not_called()
+        download_mock.assert_not_called()
+        return
+
     expander_mock.assert_called_once_with(
-        "Simulation proof · narrow (2 files)", expanded=False
+        f"{label} (2 files)", expanded=False
     )
     assert [call.args[0] for call in download_mock.call_args_list] == [
         "Download monitor1D.dat",
@@ -325,7 +341,8 @@ def test_render_png_escapes_caption_html(monkeypatch) -> None:
     assert "&lt;script&gt;" in rendered
 
 
-def test_render_artifact_history_fetches_through_authenticated_client(monkeypatch) -> None:
+@pytest.mark.parametrize("explorer_mounted", [False, True])
+def test_render_artifact_history_fetches_through_authenticated_client(monkeypatch, explorer_mounted) -> None:
     client = Mock()
     client.get_artifact.return_value = b"result\n"
     download_mock = Mock()
@@ -333,7 +350,9 @@ def test_render_artifact_history_fetches_through_authenticated_client(monkeypatc
         ui_components,
         "st",
         SimpleNamespace(
-            session_state=_SessionState(client=client),
+            session_state=_SessionState(
+                client=client, filesystem_scope="session-1" if explorer_mounted else None,
+            ),
             image=Mock(),
             download_button=download_mock,
             caption=Mock(),
@@ -353,8 +372,12 @@ def test_render_artifact_history_fetches_through_authenticated_client(monkeypatc
         }
     )
 
-    client.get_artifact.assert_called_once_with("file-1")
-    assert download_mock.call_args.kwargs["data"] == b"result\n"
+    if explorer_mounted:
+        client.get_artifact.assert_not_called()
+        download_mock.assert_not_called()
+    else:
+        client.get_artifact.assert_called_once_with("file-1")
+        assert download_mock.call_args.kwargs["data"] == b"result\n"
 
 
 def test_render_artifacts_draws_a_repeated_artifact_once_per_run(monkeypatch) -> None:
@@ -395,7 +418,8 @@ def test_render_artifacts_draws_a_repeated_artifact_once_per_run(monkeypatch) ->
     assert len(download_mock.call_args_list) == 2
 
 
-def test_render_artifacts_keeps_unidentified_files_apart(monkeypatch) -> None:
+@pytest.mark.parametrize("explorer_mounted", [False, True])
+def test_render_artifacts_keeps_unidentified_files_apart(monkeypatch, explorer_mounted) -> None:
     """Without an id there is nothing to correlate on, so nothing is dropped."""
     download_mock = Mock()
     expander_mock = Mock(return_value=_DummyContext())
@@ -403,7 +427,9 @@ def test_render_artifacts_keeps_unidentified_files_apart(monkeypatch) -> None:
         ui_components,
         "st",
         SimpleNamespace(
-            session_state=_SessionState(client=Mock()),
+            session_state=_SessionState(
+                client=Mock(), filesystem_scope="session-1" if explorer_mounted else None,
+            ),
             expander=expander_mock,
             download_button=download_mock,
             caption=Mock(),
@@ -418,7 +444,59 @@ def test_render_artifacts_keeps_unidentified_files_apart(monkeypatch) -> None:
 
     ui_components.render_artifacts({"artifacts": [artifact, dict(artifact)]})
 
+    if explorer_mounted:
+        expander_mock.assert_not_called()
+        download_mock.assert_not_called()
+        return
+
     keys = [call.kwargs["key"] for call in download_mock.call_args_list]
     assert len(keys) == 2
     assert len(set(keys)) == 2
     expander_mock.assert_called_once_with("Generated files (2 files)", expanded=False)
+
+
+def test_a_finished_turn_shows_its_steps_collapsed_above_the_answer(monkeypatch) -> None:
+    drawn: list[tuple] = []
+    fake_st = SimpleNamespace(
+        chat_message=lambda _role: _DummyContext(),
+        expander=lambda label, **kwargs: drawn.append(("expander", label, kwargs)) or _DummyContext(),
+        markdown=lambda text: drawn.append(("markdown", text)),
+        json=Mock(),
+    )
+    monkeypatch.setattr(ui_components, "st", fake_st)
+    activity = {
+        "seconds": 83.4,
+        "steps": [
+            {"id": "c1", "label": "Ask the software specialist", "state": "done", "nested": False},
+            {"id": "c2", "label": "Run `python fit.py`", "state": "failed", "nested": True},
+            {"id": None, "label": "Sandbox command timed out", "state": None, "nested": False},
+        ],
+    }
+
+    ui_components.render_message(
+        ChatMessage(type="ai", content="The fit timed out.", custom_data={"activity": activity})
+    )
+
+    # A note is shown but is not a step.
+    assert drawn[0] == (
+        "expander",
+        "Worked for 1 min 23 s · 2 steps",
+        {"icon": ":material/check:", "expanded": False},
+    )
+    assert drawn[1:] == [
+        ("markdown", ":green[:material/check_circle:] Ask the software specialist"),
+        ("markdown", "↳ :red[:material/cancel:] Run `python fit.py`"),
+        ("markdown", "Sandbox command timed out"),
+        ("markdown", "The fit timed out."),
+    ]
+
+
+def test_a_chat_loaded_from_the_server_shows_no_log(monkeypatch) -> None:
+    expander = Mock()
+    monkeypatch.setattr(ui_components, "st", SimpleNamespace(
+        chat_message=lambda _role: _DummyContext(), expander=expander, markdown=Mock(), json=Mock(),
+    ))
+
+    ui_components.render_message(ChatMessage(type="ai", content="Hello"))
+
+    expander.assert_not_called()

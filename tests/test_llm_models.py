@@ -9,22 +9,16 @@ from juena_core.schema.llm_models import (
 )
 
 
-def test_blablador_models_include_minimax() -> None:
+def test_blablador_models_include_the_curated_entries() -> None:
     models = get_models_for_provider(Provider.BLABLADOR)
 
     assert BlabladorModelName.QWEN38_FLASH_NEXT.value in models
     assert BlabladorModelName.QWEN38_FLASH_NEXT_JUWELS.value in models
     assert BlabladorModelName.MIMO_V26_PRO.value in models
     assert BlabladorModelName.GPT_OSS.value in models
-    assert BlabladorModelName.MINIMAX_M27.value in models
     assert BlabladorModelName.QWEN35_122B.value in models
-
-
-def test_blablador_display_name_for_minimax() -> None:
-    assert (
-        get_blablador_model_display_name(BlabladorModelName.MINIMAX_M27.value)
-        == "MiniMax-M2.7"
-    )
+    assert BlabladorModelName.DEEPSEEK_V41_FLASH_JUWELS.value in models
+    assert BlabladorModelName.DEEPSEEK_V41_FLASH_HZDR.value in models
 
 
 def test_blablador_display_name_for_qwen35_122b() -> None:
@@ -45,11 +39,15 @@ def test_blablador_display_names_hide_provider_ranking_prefixes() -> None:
         "Qwen3.8-Flash-Next",
         "Qwen3.8-Flash-Next (JUWELS, 940k)",
         "MiMo-V2.6-Pro",
-        "MiniMax-M2.7",
         "QWEN3.5-122B",
+        "DeepSeek-V4.1-Flash (JUWELS)",
+        "DeepSeek-V4.1-Flash (HZDR)",
     ]
     assert all(not label[:1].isdigit() for label in labels)
 
 
-def test_blablador_default_model_remains_gpt_oss() -> None:
-    assert get_default_model_for_provider(Provider.BLABLADOR) == BlabladorModelName.GPT_OSS.value
+def test_blablador_default_model_is_juwels_qwen() -> None:
+    assert (
+        get_default_model_for_provider(Provider.BLABLADOR)
+        == BlabladorModelName.QWEN38_FLASH_NEXT_JUWELS.value
+    )

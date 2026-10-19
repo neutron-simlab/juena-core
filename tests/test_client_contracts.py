@@ -459,3 +459,19 @@ def test_resume_stream_posts_an_answer_without_a_decision(
         "kind": "clarification",
         "answer": "Empty cell",
     }
+
+
+def test_filesystem_structured_conflicts_keep_readable_client_errors(client, monkeypatch):
+    monkeypatch.setattr(client._client, "request", lambda *args, **kwargs: _Response(
+        {"detail": {"code": "workspace_busy", "message": "Files are busy"}}, status_code=409,
+    ))
+    with pytest.raises(AgentClientError, match="^Error: Files are busy$"):
+        client.list_files("thread")
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_missing_or_deleted_chat_loads_as_absent(client, monkeypatch, status):
+    monkeypatch.setattr(client._client, "get", lambda *args, **kwargs: _Response(
+        {"detail": {"code": "conversation_deleted", "message": "Start a new chat"}}, status_code=status,
+    ))
+    assert client.get_chat("retired-thread") is None

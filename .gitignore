@@ -5,3 +5,7 @@ dist/
 .demo-data/
 examples/simple_chat/.env
 DOCS/
+node_modules/
+src/juena_core/ui/filesystem_dist/
+frontend/filesystem/test-results/
+frontend/filesystem/playwright-report/

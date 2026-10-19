@@ -4,4 +4,4 @@ clean-room wheel test. See 00-BOUNDARY.md, decision 7."""
 
 from __future__ import annotations
 
-__all__ = ["math_rendering", "chat_storage", "client_setup", "streaming", "components"]
+__all__ = ["math_rendering", "chat_storage", "client_setup", "streaming", "components", "filesystem"]

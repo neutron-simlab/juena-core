@@ -30,7 +30,9 @@ Do not ask for anything already stated in the objective or retrievable with a
 tool. Never ask again for something the user has already answered, and never
 reword an answered question and ask it again -- rephrasing does not make it a
 new question. Give 2-4 concrete `options` when you can name the likely choices;
-the user can always answer freely instead.
+the user can always answer freely instead. The options must cover the readings the
+objective and the data make plausible, including the one the data itself suggests;
+do not offer only the textbook alternatives.
 
 Returns the user's answer as a string."""
 

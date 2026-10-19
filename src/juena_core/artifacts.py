@@ -102,6 +102,8 @@ class _StoredArtifact:
     height: int | None
     caption: str
     created_at: str
+    category: ArtifactCategory = "result"
+    workspace_path: str | None = None
     group_id: str | None = None
     group_label: str | None = None
 
@@ -116,13 +118,15 @@ class _StoredArtifact:
             height=self.height,
             caption=self.caption,
             created_at=datetime.fromisoformat(self.created_at),
+            category=self.category,
+            workspace_path=self.workspace_path,
             group_id=self.group_id,
             group_label=self.group_label,
         )
 
 
 def undelivered_note(dropped: list[tuple[str, str]]) -> str:
-    """The block telling the model a file exists but the user cannot see it.
+    """The block telling the model a file was not delivered as a chat artifact.
 
     Shared so a file refused during a command and one refused during a write
     are described to the model in the same words.
@@ -131,8 +135,8 @@ def undelivered_note(dropped: list[tuple[str, str]]) -> str:
     return (
         "Files written to /workspace/outputs but NOT delivered to the user:\n"
         + lines
-        + "\nThe user cannot see these files. No file path, URL, or sandbox: link "
-        "will show them. Do not write a Markdown image or a path for them. Say in "
+        + "\nThese files were not attached in chat. Do not invent a download URL, "
+        "sandbox: link, or Markdown image. Say in "
         "your report that they could not be delivered, give the reason above, and "
         "offer to produce them again in a new message."
     )
@@ -153,27 +157,54 @@ class _PendingTurn:
     images: int = 0
     result_bytes: int = 0
     records: int = 0
+    # The pending result per workspace file, as (artifact_id, kind, size). A file
+    # rewritten in the same turn replaces its earlier version instead of adding a
+    # second copy, so the user receives only the latest one.
+    by_path: dict[str, tuple[str, str, int]] = field(default_factory=dict)
     # Files written straight into /workspace/outputs that could not be
     # registered. `write_file` has nowhere to report this, so it waits here for
     # the next approved execution or the specialist's final report.
     undelivered: list[tuple[str, str]] = field(default_factory=list)
     undelivered_omitted: int = 0
 
-    def admit(self, category: ArtifactCategory, kind: str, size: int) -> None:
-        """Raise when the turn has no room for this file. Never mutates."""
+    def admit(
+        self,
+        category: ArtifactCategory,
+        kind: str,
+        size: int,
+        replacing: tuple[str, str, int] | None = None,
+    ) -> None:
+        """Raise when the turn has no room for this file. Never mutates.
+
+        ``replacing`` is the earlier version this file supersedes; its room is
+        counted as free because it will be withdrawn.
+        """
         if category == "record":
             if self.records >= MAX_RECORD_ARTIFACTS_PER_TURN:
                 raise ValueError("This turn already has the maximum number of execution records")
             return
-        if kind == "image" and self.images >= MAX_IMAGE_ARTIFACTS_PER_TURN:
+        images, result_bytes = self.images, self.result_bytes
+        if replacing is not None:
+            _, old_kind, old_size = replacing
+            result_bytes -= old_size
+            if old_kind == "image":
+                images -= 1
+        if kind == "image" and images >= MAX_IMAGE_ARTIFACTS_PER_TURN:
             raise ValueError(
                 f"This turn already has the maximum of {MAX_IMAGE_ARTIFACTS_PER_TURN} plots"
             )
-        if self.result_bytes + size > MAX_ARTIFACT_BYTES_PER_TURN:
+        if result_bytes + size > MAX_ARTIFACT_BYTES_PER_TURN:
             budget_mb = MAX_ARTIFACT_BYTES_PER_TURN // 1024**2
             raise ValueError(f"This turn has reached its {budget_mb} MB file budget")
 
-    def add(self, artifact_id: str, category: ArtifactCategory, kind: str, size: int) -> None:
+    def add(
+        self,
+        artifact_id: str,
+        category: ArtifactCategory,
+        kind: str,
+        size: int,
+        workspace_path: str | None = None,
+    ) -> None:
         self.ids.append(artifact_id)
         if category == "record":
             self.records += 1
@@ -182,6 +213,16 @@ class _PendingTurn:
         self.result_bytes += size
         if kind == "image":
             self.images += 1
+        if workspace_path:
+            self.by_path[workspace_path] = (artifact_id, kind, size)
+
+    def withdraw(self, artifact_id: str, kind: str, size: int) -> None:
+        """Drop a superseded result and give its room back."""
+        self.ids.remove(artifact_id)
+        self.result_ids.remove(artifact_id)
+        self.result_bytes -= size
+        if kind == "image":
+            self.images -= 1
 
 
 class ArtifactStore:
@@ -275,6 +316,7 @@ class ArtifactStore:
         content: bytes,
         caption: str | None = None,
         category: ArtifactCategory = "result",
+        workspace_path: str | None = None,
         group_id: str | None = None,
         group_label: str | None = None,
     ) -> ArtifactRef:
@@ -288,6 +330,8 @@ class ArtifactStore:
             thread_id=thread_id,
             run_id=run_id,
             filename=safe_filename,
+            category=category,
+            workspace_path=workspace_path,
             mime_type=mime_type,
             kind=kind,
             size=len(content),
@@ -302,7 +346,15 @@ class ArtifactStore:
         with self._lock:
             key = (user_id, thread_id)
             pending = self._pending_message.setdefault(key, _PendingTurn())
-            pending.admit(category, kind, len(content))
+            # A result written again to the same workspace file supersedes the
+            # earlier version from this turn. It still gets a new id: reusing the
+            # old one would hide the rewrite from a later specialist's baseline.
+            replacing = (
+                pending.by_path.get(workspace_path)
+                if category == "result" and workspace_path
+                else None
+            )
+            pending.admit(category, kind, len(content), replacing)
             user_root = self._user_root(user_id)
             user_root.mkdir(parents=True, exist_ok=True, mode=0o700)
             content_path = self._content_path(user_id, artifact_id)
@@ -313,8 +365,13 @@ class ArtifactStore:
             metadata_tmp.write_text(json.dumps(asdict(stored), sort_keys=True), encoding="utf-8")
             os.replace(content_tmp, content_path)
             os.replace(metadata_tmp, metadata_path)
-            pending.add(artifact_id, category, kind, len(content))
-            self._pending_events.setdefault(key, []).append(artifact_id)
+            queued_events = self._pending_events.setdefault(key, [])
+            if replacing is not None:
+                pending.withdraw(*replacing)
+                if replacing[0] in queued_events:
+                    queued_events.remove(replacing[0])
+            pending.add(artifact_id, category, kind, len(content), workspace_path)
+            queued_events.append(artifact_id)
         return stored.public_ref()
 
     def _load(self, user_id: str, artifact_id: str) -> _StoredArtifact | None:

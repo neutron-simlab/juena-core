@@ -82,6 +82,23 @@ def test_artifact_group_survives_persistence_and_message_delivery(tmp_path) -> N
     )
 
 
+def test_execution_category_and_workspace_path_survive_restart(tmp_path) -> None:
+    store = _store(tmp_path)
+    record = store.register_artifact(
+        user_id="user", thread_id="thread", run_id="run", filename="command.sh",
+        content=b"echo done", category="record",
+    )
+    result = store.register_artifact(
+        user_id="user", thread_id="thread", run_id="run", filename="result.csv",
+        content=b"original", workspace_path="/workspace/outputs/nested/result.csv",
+    )
+    restored = _store(tmp_path)
+    assert restored.get("user", record.artifact_id)[0].category == "record"
+    ref, data = restored.get("user", result.artifact_id)
+    assert ref.workspace_path == "/workspace/outputs/nested/result.csv"
+    assert data == b"original"
+
+
 def test_execution_records_do_not_consume_the_result_budget(tmp_path) -> None:
     """The production failure, in one assertion.
 

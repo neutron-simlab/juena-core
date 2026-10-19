@@ -175,6 +175,70 @@ def test_dropped_plot_is_reported_to_the_model(tmp_path) -> None:
     assert "Artifacts collected automatically" not in result.output
 
 
+class _FailedPlotJobs(_PlotJobs):
+    """A command that writes its plot and then exits with an error."""
+
+    def execute(self, **request):
+        result = super().execute(**request)
+        return SandboxExecutionResult(
+            job_id=result.job_id,
+            output="Traceback: fit did not converge\n",
+            exit_code=1,
+            status="failed",
+            artifact_names=result.artifact_names,
+        )
+
+
+def test_a_successful_run_is_told_to_finish(tmp_path) -> None:
+    store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
+    set_artifact_store_for_tests(store)
+    try:
+        result = _plot_backend(tmp_path).execute("python fit.py")
+    finally:
+        set_artifact_store_for_tests(None)
+
+    assert "Finish the report now." in result.output
+
+
+def test_a_failed_run_with_outputs_is_not_told_to_finish(tmp_path) -> None:
+    """A failed command may still need a fix and a rerun."""
+    store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
+    set_artifact_store_for_tests(store)
+    try:
+        result = _plot_backend(tmp_path, _FailedPlotJobs).execute("python fit.py")
+        refs = store.peek_result_refs("user-a", "thread-a")
+    finally:
+        set_artifact_store_for_tests(None)
+
+    assert result.exit_code == 1
+    assert "Finish the report now" not in result.output
+    assert "The command failed, but these files were collected" in result.output
+    assert [ref.filename for ref in refs] == ["plot.png"]
+
+
+def test_rerunning_a_plot_delivers_only_the_latest_version(tmp_path) -> None:
+    """Each rerun rewrites outputs/plot.png; the user should get one plot.
+
+    Before, every version counted against the per-turn plot budget, so a ninth
+    run could no longer deliver its plot at all.
+    """
+    store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
+    set_artifact_store_for_tests(store)
+    backend = _plot_backend(tmp_path)
+    try:
+        results = [backend.execute("python fit.py") for _ in range(MAX_IMAGE_ARTIFACTS_PER_TURN + 1)]
+        refs = store.peek_result_refs("user-a", "thread-a")
+        claimed = store.claim_for_message("user-a", "thread-a")
+    finally:
+        set_artifact_store_for_tests(None)
+
+    assert all("NOT delivered" not in result.output for result in results)
+    assert [ref.filename for ref in refs] == ["plot.png"]
+    assert [item["filename"] for item in claimed] == ["plot.png"]
+    # The delivered version is the one the last run reported.
+    assert refs[0].artifact_id in results[-1].output
+
+
 def test_busy_workspace_reports_the_missing_file(tmp_path) -> None:
     """_collect returns nothing when the guard is busy, which used to be silent."""
 
@@ -246,7 +310,7 @@ def test_runtime_backend_routes_only_explicit_read_only_prefixes(monkeypatch, tm
 
     assert isinstance(composite, BackendProtocol)
     assert not callable(composite)
-    assert composite.artifacts_root == "/workspace"
+    assert composite.artifacts_root == "/workspace/.scratch"
 
     try:
         middleware = FilesystemMiddleware(backend=composite)
@@ -256,8 +320,8 @@ def test_runtime_backend_routes_only_explicit_read_only_prefixes(monkeypatch, tm
         assert resolved is composite
         assert supports_execution(composite)
         assert isinstance(composite.default, RuntimePodmanSandboxBackend)
-        assert composite.artifacts_root == "/workspace"
-        assert middleware._large_tool_results_prefix == "/workspace/large_tool_results"
+        assert composite.artifacts_root == "/workspace/.scratch"
+        assert middleware._large_tool_results_prefix == "/workspace/.scratch/large_tool_results"
         first_workspace = workspace_id_for("user-a", "thread-a", "t" * 32)
         assert composite.default.id == first_workspace
 

@@ -306,6 +306,7 @@ def test_execute_still_runs_where_the_tool_is_actually_bound(store) -> None:
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
     from langchain_core.messages import AIMessage
     from langchain_core.tools import tool
+    from langgraph.checkpoint.memory import InMemorySaver
 
     from juena_core.server.agent.runtime_model_middleware import RuntimeModelContext
 
@@ -331,11 +332,15 @@ def test_execute_still_runs_where_the_tool_is_actually_bound(store) -> None:
                         {"name": "execute", "args": {"command": "python plot.py"}, "id": "c1"}
                     ],
                 ),
+                AIMessage(content="", tool_calls=[
+                    {"name": "execute", "args": {"command": "python validate.py"}, "id": "c2"}
+                ]),
                 AIMessage(content="done"),
             ]
         ),
         tools=[execute],
         middleware=[SandboxExecutionMiddleware()],
+        checkpointer=InMemorySaver(),
     )
 
     agent.invoke(
@@ -351,7 +356,9 @@ def test_execute_still_runs_where_the_tool_is_actually_bound(store) -> None:
         ),
     )
 
-    assert ran == ["python plot.py"], "the approved command never reached the sandbox"
+    assert ran == ["python plot.py", "python validate.py"]
+    snapshot = agent.get_state({"configurable": {"thread_id": "thread-a"}})
+    assert [event["command"] for event in snapshot.values["execution_events"]] == ran
 
 
 def test_evidence_is_scoped_by_the_invocation_id_the_context_carries(store) -> None:

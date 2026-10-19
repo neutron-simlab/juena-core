@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -18,6 +18,7 @@ from PIL import Image
 
 from juena_core.schema.agents import SpecialistReport
 from juena_core.agents.specialist_outcome import (
+    REPORT_REMINDER_KEY,
     ExecutionEvidenceMiddleware,
     SpecialistOutcomeMiddleware,
 )
@@ -231,6 +232,99 @@ def test_real_agent_delivers_the_package_as_its_final_message(store) -> None:
     assert "STATUS: VERIFIED" in final.text
 
 
+class _ScriptedModel(FakeMessagesListChatModel):
+    """Replays fixed replies in order and counts how often it was called."""
+
+    calls: int = 0
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.calls += 1
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
+def _report_call() -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "SpecialistReport",
+                "args": {"status": "completed", "finding": "The value is 17.", "evidence": ["Direct evidence"]},
+                "id": "structured-report",
+            }
+        ],
+    )
+
+
+@tool
+def lookup_value() -> str:
+    """Return the stored value."""
+    return "17"
+
+
+def _specialist_agent(model, *extra_middleware):
+    # A real specialist always has tools. Without any, LangChain itself keeps
+    # calling the model until a structured response appears.
+    return create_agent(
+        model=model,
+        tools=[lookup_value],
+        response_format=ToolStrategy(SpecialistReport),
+        middleware=[SpecialistOutcomeMiddleware(specialist_name="specialist"), *extra_middleware],
+    )
+
+
+def _reminders(result) -> list:
+    return [m for m in result["messages"] if m.additional_kwargs.get(REPORT_REMINDER_KEY)]
+
+
+def test_plain_text_answer_gets_one_reminder_and_then_reports(store) -> None:
+    model = _ScriptedModel(responses=[AIMessage("The value is 17."), _report_call()])
+
+    result = _specialist_agent(model).invoke({"messages": [("user", "What is the value?")]})
+
+    assert len(_reminders(result)) == 1
+    assert model.calls == 2
+    assert "STATUS: VERIFIED" in result["messages"][-1].text
+    assert "Finding: The value is 17." in result["messages"][-1].text
+
+
+def test_a_second_plain_answer_still_fails_closed(store) -> None:
+    model = _ScriptedModel(
+        responses=[AIMessage("First plain answer."), AIMessage("Second plain answer."), _report_call()]
+    )
+
+    result = _specialist_agent(model).invoke({"messages": [("user", "What is the value?")]})
+
+    assert len(_reminders(result)) == 1
+    assert model.calls == 2  # the report that would come third is never requested
+    final = result["messages"][-1].text
+    assert "STATUS: UNVERIFIED" in final
+    assert "returned no structured report" in final
+
+
+def test_the_call_budget_still_bounds_the_reminder(store) -> None:
+    """The reminder's extra model call goes through the call limit like any other."""
+
+    model = _ScriptedModel(responses=[AIMessage("Plain answer."), _report_call()])
+    limit = ModelCallLimitMiddleware(run_limit=1, exit_behavior="end")
+
+    result = _specialist_agent(model, limit).invoke({"messages": [("user", "What is the value?")]})
+
+    assert model.calls == 1
+    assert "STATUS: UNVERIFIED" in result["messages"][-1].text
+
+
+def test_a_report_on_the_first_call_gets_no_reminder(store) -> None:
+    model = _ScriptedModel(responses=[_report_call()])
+
+    result = _specialist_agent(model).invoke({"messages": [("user", "What is the value?")]})
+
+    assert _reminders(result) == []
+    assert model.calls == 1
+
+
 def _execution(run_id: str, status: str, exit_code: int) -> dict:
     return {
         "graph_run_id": run_id,
@@ -371,3 +465,119 @@ async def test_checkpointed_execution_history_is_filtered_on_real_consecutive_tu
     assert "completed (exit 0)" in first["messages"][-1].text
     assert "failed (exit 9)" in second["messages"][-1].text
     assert "completed (exit 0)" not in second["messages"][-1].text
+
+
+class _ToolHungryModel(FakeMessagesListChatModel):
+    """Calls `lookup_value` whenever it is offered, like a model that keeps
+    researching; it can only report when no other tool is bound."""
+
+    offered: list[list[str]] = []
+    last_prompts: list[str] = []
+
+    def bind_tools(self, tools, **kwargs):
+        self.offered.append([getattr(t, "name", None) or t["function"]["name"] for t in tools])
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        self.last_prompts.append(str(messages[-1].content))
+        if "lookup_value" in self.offered[-1]:
+            reply = AIMessage(content="", tool_calls=[
+                {"name": "lookup_value", "args": {}, "id": f"lookup-{len(self.offered)}"}
+            ])
+        else:
+            reply = _report_call()
+        return ChatResult(generations=[ChatGeneration(message=reply)])
+
+
+def test_a_spent_tool_budget_ends_in_a_report_not_an_empty_run() -> None:
+    """With no model-call cap, the tool budget bounds a specialist. Once it is
+    spent, the next call may only submit the report, so the run ends with what
+    the specialist found instead of looping on refused tools."""
+    from langchain.agents.middleware import ToolCallLimitMiddleware
+
+    from juena_core.agents.specialist_outcome import (
+        TOOL_BUDGET_SPENT,
+        ReportWhenToolsRunOutMiddleware,
+    )
+
+    limit = ReportWhenToolsRunOutMiddleware.REPORT_RESERVE + 2  # two research calls
+    model = _ToolHungryModel(responses=[AIMessage(content="unused")], offered=[], last_prompts=[])
+    agent = _specialist_agent(
+        model,
+        ReportWhenToolsRunOutMiddleware(tool_call_limit=limit),
+        ToolCallLimitMiddleware(run_limit=limit, exit_behavior="continue"),
+    )
+
+    result = agent.invoke({"messages": [HumanMessage(content="Find the value.")]})
+
+    tool_replies = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert [m.content for m in tool_replies if m.name == "lookup_value"] == ["17", "17"]
+    # The report is not refused by the tool limit it was forced to respect.
+    assert not any("limit exceeded" in str(m.content) for m in tool_replies)
+    assert model.offered[-1] == ["SpecialistReport"]
+    assert model.last_prompts[-1] == TOOL_BUDGET_SPENT
+    final = result["messages"][-1].content
+    assert "STATUS: VERIFIED" in final
+    assert "The value is 17." in final
+
+
+def _lookup_call(n: int) -> AIMessage:
+    return AIMessage(content="", tool_calls=[{"name": "lookup_value", "args": {}, "id": f"lookup-{n}"}])
+
+
+def _filed_specialist(model):
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+
+    from juena_core.agents.specialist_runtime import build_specialist_backend
+
+    return _specialist_agent(model, FilesystemMiddleware(backend=build_specialist_backend()))
+
+
+def test_a_researched_report_is_saved_to_findings_for_the_next_task() -> None:
+    """Whether a finding existed used to rest on the supervisor asking; after long
+    research it often did not. The server now keeps the report itself."""
+    model = _ScriptedModel(responses=[*[_lookup_call(n) for n in range(3)], _report_call()])
+
+    result = _filed_specialist(model).invoke(
+        {"messages": [HumanMessage(content="Find the value.")], "files": {}}
+    )
+
+    note = result["files"]["/findings/the-value-is-17.md"]["content"]
+    assert note.startswith("# The value is 17.")
+    assert "the server did not verify it" in note
+    assert "Status: completed" in note
+    assert "## Objective\n\nFind the value." in note
+    assert "## Evidence\n\n- Direct evidence" in note
+    assert "Report saved for later work: /findings/the-value-is-17.md" in result["messages"][-1].content
+
+
+def test_a_short_lookup_or_a_note_the_specialist_wrote_is_not_copied() -> None:
+    short = _ScriptedModel(responses=[_lookup_call(0), _report_call()])
+    wrote_own = _ScriptedModel(responses=[
+        *[_lookup_call(n) for n in range(3)],
+        AIMessage(content="", tool_calls=[{
+            "name": "write_file", "id": "note",
+            "args": {"file_path": "/findings/value.md", "content": "The value is 17."},
+        }]),
+        _report_call(),
+    ])
+
+    for model, expected in ((short, set()), (wrote_own, {"/findings/value.md"})):
+        result = _filed_specialist(model).invoke(
+            {"messages": [HumanMessage(content="Find the value.")], "files": {}}
+        )
+        assert {p for p in result["files"] if p.startswith("/findings/")} == expected
+        assert "Report saved for later work" not in result["messages"][-1].content
+
+
+def test_the_saved_report_crosses_back_to_the_supervisor() -> None:
+    from juena_core.agents.delegation import SpecialistDelegate
+
+    model = _ScriptedModel(responses=[*[_lookup_call(n) for n in range(3)], _report_call()])
+    delegate = SpecialistDelegate(_filed_specialist(model), name="specialist")
+
+    returned = delegate.invoke({"messages": [HumanMessage(content="Find the value.")], "files": {}})
+
+    assert list(returned["files"]) == ["/findings/the-value-is-17.md"]

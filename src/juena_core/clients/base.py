@@ -74,6 +74,8 @@ def _http_error_message(exc: httpx.HTTPError) -> str:
             payload = None
         if isinstance(payload, dict):
             detail = payload.get("detail")
+            if isinstance(detail, dict) and isinstance(detail.get("message"), str):
+                detail = detail["message"]
             if detail:
                 return f"Error: {detail}"
     return f"Error: {exc}"
@@ -213,6 +215,32 @@ class BaseAgentClient:
             data["provider"] = provider_value
         return data
 
+    def _filesystem_request(self, method: str, thread_id: str, suffix: str = "", **kwargs):
+        from urllib.parse import quote
+        try:
+            response = self._client.request(
+                method, f"{self.base_url}/threads/{quote(thread_id, safe='')}/filesystem{suffix}",
+                headers=self._headers, timeout=self.timeout, **kwargs,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            _raise_http_error(exc)
+        return response
+
+    def list_files(self, thread_id: str, path: str = "/", *, hidden: bool = False, offset: int = 0):
+        return self._filesystem_request("GET", thread_id, params={"path": path, "hidden": hidden, "offset": offset}).json()
+
+    def read_file(self, thread_id: str, path: str):
+        return self._filesystem_request("GET", thread_id, "/file", params={"path": path}).json()
+
+    def download_file(self, thread_id: str, path: str) -> bytes:
+        return self._filesystem_request("GET", thread_id, "/download", params={"path": path}).content
+
+    def save_file(self, thread_id: str, path: str, text: str, revision: str):
+        return self._filesystem_request("PUT", thread_id, "/file", json={
+            "path": path, "text": text, "revision": revision,
+        }).json()
+
     # ------------------------------------------------------------------
     # Chats
     # ------------------------------------------------------------------
@@ -276,7 +304,7 @@ class BaseAgentClient:
                 headers=self._headers,
                 timeout=self.timeout,
             )
-            if response.status_code == 404:
+            if response.status_code in (404, 410):
                 return None
             response.raise_for_status()
         except httpx.HTTPError as exc:
@@ -360,7 +388,9 @@ class BaseAgentClient:
                 "phase": parsed.get("phase", ""),
                 "label": parsed.get("label", ""),
                 "tool": parsed.get("tool"),
-                "summary": parsed.get("summary"),
+                "tool_call_id": parsed.get("tool_call_id"),
+                "failed": bool(parsed.get("failed")),
+                "from_subagent": bool(parsed.get("from_subagent")),
             }
 
         if parsed_type == "clarification_required":
@@ -398,6 +428,8 @@ class BaseAgentClient:
                 "caption": parsed.get("caption", "Plot"),
                 "created_at": parsed.get("created_at"),
                 "content_base64": parsed.get("content_base64", ""),
+                # Lets the UI keep only the newest version of a rewritten file.
+                "workspace_path": parsed.get("workspace_path"),
             }
 
         # An application's own event. Handed over whole: core cannot render it,

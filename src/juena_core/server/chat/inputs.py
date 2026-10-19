@@ -9,15 +9,17 @@ files reach a shell or a simulation binary: that is the application's
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any
 
-from deepagents.backends.utils import create_file_data
+from deepagents.backends.utils import create_file_data, file_data_to_string
 from fastapi import UploadFile
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 
+from juena_core.filesystem.service import ThreadFiles
 from juena_core.log import get_logger
 from juena_core.schema.upload_limits import (
     CHAT_INPUT_MAX_UPLOAD_MB,
@@ -136,6 +138,7 @@ async def normalize_uploaded_attachments(
     *,
     existing_upload_paths: Sequence[str] | None = None,
     allowed_suffixes: Collection[str] | None = None,
+    preserve_bytes: bool = False,
 ) -> tuple[list[UploadedAttachment], dict[str, Any]]:
     """Validate uploads and stage them under ``/inputs/uploads``.
 
@@ -176,6 +179,10 @@ async def normalize_uploaded_attachments(
         staged_name = _dedupe_staged_name(sanitized_name, taken_names)
         raw = await _read_upload_bounded(upload, original_name)
         text = _decode_upload_text(raw, original_name)
+        if preserve_bytes:
+            # Validation above accepts UTF-8 with a BOM. Keep its exact bytes in
+            # the shared workspace, including line endings and the optional BOM.
+            text = raw.decode("utf-8")
         staged_path = f"{_UPLOADS_PREFIX}{staged_name}"
         files_update[staged_path] = create_file_data(text)
         normalized.append(
@@ -219,6 +226,7 @@ async def prepare_code_chat_turn_inputs(
     *,
     closing_note: str,
     allowed_suffixes: Collection[str] | None = None,
+    thread_files: ThreadFiles | None = None,
 ) -> PreparedCodeChatInputs | None:
     """Prepare staged ``/inputs`` files and a manifest for one chat turn."""
 
@@ -234,11 +242,37 @@ async def prepare_code_chat_turn_inputs(
         attachments,
         existing_upload_paths=existing_upload_paths,
         allowed_suffixes=allowed_suffixes,
+        preserve_bytes=thread_files is not None,
     )
     files_update.update(uploaded_updates)
+    if thread_files is not None:
+        async with thread_files.aguard():
+            thread_files.migrate(existing_files)
+            canonical = []
+            for upload in uploaded:
+                text = file_data_to_string(uploaded_updates[upload.staged_path])
+                path = thread_files.add_upload(Path(upload.staged_path).name, text.encode("utf-8"))
+                canonical.append(replace(upload, staged_path=path))
+            uploaded = canonical
+            upload_dir = thread_files.path("/workspace/uploads")
+            existing_upload_paths = sorted(
+                f"/workspace/uploads/{p.name}" for p in upload_dir.iterdir()
+                if p.is_file() and not p.is_symlink()
+            ) if upload_dir.is_dir() else []
+        # Disk is authoritative. Legacy paths remain readable via the alias map.
+        for path in list(files_update):
+            if path.startswith(_UPLOADS_PREFIX):
+                del files_update[path]
+        for path in existing_files:
+            if path.startswith(_UPLOADS_PREFIX):
+                files_update[path] = None
     has_thread_uploads = bool(existing_upload_paths or uploaded)
 
     uploads_manifest = build_uploads_manifest(existing_files, existing_upload_paths, uploaded)
+    if thread_files is not None and existing_upload_paths:
+        uploads_manifest = ("# Conversation uploads\n\n" + "\n".join(
+            f"- `{path}`" for path in existing_upload_paths
+        ), None)
     if uploads_manifest is not None:
         manifest_content, manifest_created_at = uploads_manifest
         files_update[_UPLOADS_MANIFEST_PATH] = create_file_data(
@@ -276,6 +310,7 @@ async def prepare_code_chat_turn_inputs(
                 pasted_context,
                 has_thread_uploads=has_thread_uploads,
                 closing_note=closing_note,
+                uploads_prefix="/workspace/uploads/" if thread_files else _UPLOADS_PREFIX,
             ),
             files_update=files_update,
             attachments=tuple(uploaded),

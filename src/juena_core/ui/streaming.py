@@ -34,6 +34,7 @@ declared parameter rather than carried across (the same treatment CP4 gave
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -43,11 +44,17 @@ import streamlit as st
 from juena_core.clients.base import AgentClientError
 from juena_core.schema.interrupts import CLARIFICATION_KIND
 from juena_core.schema.server import ChatMessage
-from juena_core.ui.components import finalize_streaming_message, render_streaming_token
+from juena_core.ui.components import (
+    activity_line,
+    activity_summary,
+    finalize_streaming_message,
+    render_streaming_token,
+)
 
 __all__ = [
     "SESSION_KEYS",
     "ApprovalCard",
+    "ActivityLog",
     "process_stream_chunk",
     "is_status_chunk",
     "is_approval_chunk",
@@ -60,7 +67,7 @@ __all__ = [
 ]
 
 #: Every ``st.session_state`` name this module touches. The page owns the first
-#: five and merely shares them; the last two are this module's own bookkeeping.
+#: five and merely shares them; the remainder are this module's bookkeeping.
 SESSION_KEYS = (
     "client",
     "thread_id",
@@ -69,9 +76,84 @@ SESSION_KEYS = (
     "selected_provider",
     "pending_approvals",
     "approval_checked_threads",
+    "filesystem_refresh",
+    "pending_activity",
 )
 
 StatusRenderer = Callable[[Any, dict[str, Any]], None]
+
+
+class ActivityLog:
+    """The steps of one turn, one line each, inside the status box.
+
+    A tool call's line is drawn when the model makes the call and redrawn in
+    place when its result is back. Each step is a plain dict -- ``id``,
+    ``label``, ``state`` (``running``/``done``/``failed``, or ``None`` for a
+    note) and ``nested`` -- so :attr:`steps` can wait in session state while a
+    turn is paused for the user, and be kept on the answer once it ends.
+
+    It is also what an application's status renderer receives, so it offers
+    the two calls those renderers make on a status box: :meth:`write` adds a
+    note and :meth:`update` relabels the box.
+    """
+
+    def __init__(self, status: Any, steps: Iterable[dict[str, Any]] = ()) -> None:
+        self._status = status
+        self._slots: list[Any] = []
+        self._complete = False
+        self.steps: list[dict[str, Any]] = []
+        for step in steps:
+            self._add(dict(step))
+
+    def start(self, step_id: str | None, label: str, nested: bool) -> None:
+        """Show a tool call the model has just made."""
+        if self._complete:
+            # The answer had begun, then the model reached for another tool.
+            self.update(label="Working…", state="running", expanded=True)
+        index = self._index(step_id)
+        if index is None:
+            self._add({"id": step_id, "label": label, "state": "running", "nested": nested})
+            return
+        # A resumed turn can announce the call it paused on again, and an
+        # edited command arrives under the same id with new arguments.
+        self.steps[index]["label"] = label
+        self._redraw(index)
+
+    def finish(self, step_id: str | None, label: str, failed: bool, nested: bool) -> None:
+        """Mark a tool call finished, or failed, once its result is back."""
+        state = "failed" if failed else "done"
+        index = self._index(step_id)
+        if index is None:
+            # Its call was announced in a stream this page no longer holds.
+            self._add({"id": step_id, "label": label, "state": state, "nested": nested})
+            return
+        self.steps[index]["state"] = state
+        self._redraw(index)
+
+    def write(self, text: str) -> None:
+        """Add a note, such as why a sandbox run failed."""
+        self._add({"id": None, "label": str(text), "state": None, "nested": False})
+
+    def update(self, **kwargs: Any) -> None:
+        """Relabel, open or close the status box."""
+        if "state" in kwargs:
+            self._complete = kwargs["state"] == "complete"
+        self._status.update(**kwargs)
+
+    def _index(self, step_id: str | None) -> int | None:
+        if step_id:
+            for index, step in enumerate(self.steps):
+                if step["id"] == step_id:
+                    return index
+        return None
+
+    def _add(self, step: dict[str, Any]) -> None:
+        self.steps.append(step)
+        self._slots.append(self._status.empty())
+        self._redraw(len(self.steps) - 1)
+
+    def _redraw(self, index: int) -> None:
+        self._slots[index].markdown(activity_line(self.steps[index]))
 
 
 def _default_limits_caption(limits: Mapping[str, Any]) -> str:
@@ -113,6 +195,25 @@ class ApprovalCard:
 def _session_list(key: str) -> list[Any]:
     value = st.session_state.get(key)
     return value if isinstance(value, list) else []
+
+
+def _newest_per_workspace_file(items: list[Any]) -> list[Any]:
+    """Keep only the latest live artifact for each workspace file.
+
+    A file rewritten during one answer streams one artifact event per version.
+    Events arrive in registration order, so the last one per path is current;
+    events without a workspace path are kept as they are.
+    """
+    def path_of(item: Any) -> str | None:
+        return (item.get("workspace_path") or None) if isinstance(item, dict) else None
+
+    last_index = {path_of(item): index for index, item in enumerate(items)}
+    kept = []
+    for index, item in enumerate(items):
+        path = path_of(item)
+        if path is None or last_index[path] == index:
+            kept.append(item)
+    return kept
 
 
 def _replace_message_by_id(messages: list[Any], chunk: ChatMessage) -> bool:
@@ -164,7 +265,7 @@ def process_stream_chunk(
             }
             live_by_id = {
                 item.get("artifact_id"): item
-                for item in pending_artifacts
+                for item in _newest_per_workspace_file(pending_artifacts)
                 if isinstance(item, dict) and item.get("artifact_id")
             }
             # Stored metadata is authoritative and keeps its order, while a
@@ -236,38 +337,42 @@ def is_artifact_chunk(chunk: Any) -> bool:
 
 
 def apply_status_chunk(
-    status: Any,
+    activity: ActivityLog,
     chunk: dict[str, Any],
     custom_status: Mapping[str, StatusRenderer] | None = None,
 ) -> None:
-    """Reflect an activity event in the status container.
+    """Reflect an activity event in the status box.
 
-    Tool calls are written as lines inside the container so the transcript
-    stays free of raw tool payloads. An application's own status event is
-    handed to the renderer it registered in ``custom_status``.
+    A tool call becomes a line in the activity log, and its result marks that
+    line finished, so the transcript stays free of raw tool payloads. An
+    application's own status event is handed to the renderer it registered in
+    ``custom_status``.
     """
     chunk_type = chunk.get("type", "")
     renderer = (custom_status or {}).get(chunk_type)
     if renderer is not None:
-        renderer(status, chunk)
+        renderer(activity, chunk)
         return
 
     phase = chunk.get("phase", "")
     label = chunk.get("label", "")
+    nested = bool(chunk.get("from_subagent"))
+
+    if phase == "tool_call":
+        activity.start(chunk.get("tool_call_id"), label, nested)
+        return
 
     if phase == "tool":
-        tool = chunk.get("tool") or "tool"
-        summary = chunk.get("summary") or ""
-        status.write(f"🔧 `{tool}` — {summary}" if summary else f"🔧 `{tool}`")
+        activity.finish(chunk.get("tool_call_id"), label, bool(chunk.get("failed")), nested)
         return
 
     if phase == "done":
         # First answer token: collapse the activity log and get out of the way.
-        status.update(label="Done", state="complete", expanded=False)
+        activity.update(label="Done", state="complete", expanded=False)
         return
 
     if label:
-        status.update(label=label)
+        activity.update(label=label)
 
 
 def _stream_and_display_chunks(
@@ -283,15 +388,27 @@ def _stream_and_display_chunks(
     received_complete_message = False
     pending_artifacts: list[dict[str, Any]] = []
     waiting_for_user = False
+    thread_id = st.session_state.get("thread_id")
     checked_threads = set(st.session_state.get("approval_checked_threads") or ())
-    checked_threads.discard(st.session_state.get("thread_id"))
+    checked_threads.discard(thread_id)
     st.session_state.approval_checked_threads = checked_threads
+    # A turn that paused for the user left its steps here. The resumed stream
+    # starts from them, so the whole turn reads as one log.
+    paused_activity = dict(st.session_state.get("pending_activity") or {})
+    carried = paused_activity.pop(thread_id, None) or {}
+    st.session_state.pending_activity = paused_activity
+    started = time.monotonic()
 
     try:
-        with st.status("Thinking…", expanded=False) as status:
+        # The box goes above the answer, both inside the slot the page reserved.
+        with message_placeholder.container():
+            status = st.status("Thinking…", expanded=True)
+            answer = st.empty()
+        activity = ActivityLog(status, carried.get("steps") or ())
+        with status:
             for chunk in chunks:
                 if is_status_chunk(chunk, custom_status):
-                    apply_status_chunk(status, chunk, custom_status)
+                    apply_status_chunk(activity, chunk, custom_status)
                     continue
                 if is_artifact_chunk(chunk):
                     pending_artifacts.append(chunk)
@@ -301,7 +418,7 @@ def _stream_and_display_chunks(
                     approvals[st.session_state.thread_id] = chunk
                     st.session_state.pending_approvals = approvals
                     waiting_for_user = True
-                    status.update(
+                    activity.update(
                         label=(
                             "Waiting for confirmation"
                             if is_approval_chunk(chunk)
@@ -316,20 +433,37 @@ def _stream_and_display_chunks(
                     st.session_state.client,
                     response_text,
                     received_complete_message,
-                    message_placeholder,
+                    answer,
                     st.session_state.messages,
                     pending_artifacts,
                 )
 
-            if not waiting_for_user:
-                status.update(label="Done", state="complete", expanded=False)
+            record = {
+                "steps": activity.steps,
+                "seconds": (carried.get("seconds") or 0) + time.monotonic() - started,
+            }
+            if waiting_for_user:
+                if activity.steps:
+                    paused_activity = dict(st.session_state.get("pending_activity") or {})
+                    paused_activity[thread_id] = record
+                    st.session_state.pending_activity = paused_activity
+            else:
+                activity.update(
+                    label=activity_summary(record) if activity.steps else "Done",
+                    state="complete",
+                    expanded=False,
+                )
 
         if response_text and not received_complete_message:
-            custom_data = {"artifacts": pending_artifacts} if pending_artifacts else {}
+            custom_data = (
+                {"artifacts": _newest_per_workspace_file(pending_artifacts)}
+                if pending_artifacts
+                else {}
+            )
             if custom_data:
-                finalize_streaming_message(message_placeholder, response_text, custom_data)
+                finalize_streaming_message(answer, response_text, custom_data)
             else:
-                finalize_streaming_message(message_placeholder, response_text)
+                finalize_streaming_message(answer, response_text)
             st.session_state.messages.append(
                 ChatMessage(type="ai", content=response_text, custom_data=custom_data)
             )
@@ -345,13 +479,23 @@ def _stream_and_display_chunks(
             if isinstance(last_msg, ChatMessage) and last_msg.type == "ai":
                 if last_msg.custom_data.get("artifacts"):
                     finalize_streaming_message(
-                        message_placeholder,
+                        answer,
                         last_msg.content,
                         last_msg.custom_data,
                     )
                 else:
-                    finalize_streaming_message(message_placeholder, last_msg.content)
+                    finalize_streaming_message(answer, last_msg.content)
 
+        if not waiting_for_user and activity.steps:
+            # Kept on the answer for this browser session, where the transcript
+            # draws it after the rerun. The server stores no log.
+            for message in reversed(st.session_state.messages[initial_message_count:]):
+                if isinstance(message, ChatMessage) and message.type == "ai":
+                    message.custom_data["activity"] = record
+                    break
+
+        refresh = st.session_state.setdefault("filesystem_refresh", {})
+        refresh[thread_id] = refresh.get(thread_id, 0) + 1
         if should_rerun:
             st.rerun()
 

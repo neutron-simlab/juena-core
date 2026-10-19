@@ -89,11 +89,11 @@ def test_worker_output_and_artifacts_reach_the_application_validator(tmp_path) -
         run_id="live-run",
     )
     command = (
-        "mkdir -p outputs && python -c \"from pathlib import Path; "
+        "mkdir -p /workspace/outputs && python -c \"from pathlib import Path; "
         "from PIL import Image; import sys; print('stdout ok'); "
         "print('stderr ok', file=sys.stderr); "
-        "Path('outputs/data.csv').write_text('x,y\\n1,2\\n'); "
-        "Image.new('RGB',(8,8),'red').save('outputs/plot.png')\""
+        "Path('/workspace/outputs/data.csv').write_text('x,y\\n1,2\\n'); "
+        "Image.new('RGB',(8,8),'red').save('/workspace/outputs/plot.png')\""
     )
 
     try:
@@ -126,7 +126,7 @@ def test_jscatter_fit_graceplot_and_artifact_reload(tmp_path) -> None:
         thread_id=thread_id,
         run_id="jscatter-live-run",
     )
-    command = r'''mkdir -p outputs && python - <<'PY'
+    command = r'''mkdir -p /workspace/outputs && python - <<'PY'
 from pathlib import Path
 import json
 import numpy as np
@@ -159,7 +159,7 @@ data.fit(
 fit = data.lastfit
 assert np.isfinite(fit.radius) and np.isfinite(fit.radius_err)
 assert abs(fit.radius - 5.5) < 0.5
-fit.savetxt("outputs/jscatter-fit.dat")
+fit.savetxt("/workspace/outputs/jscatter-fit.dat")
 
 plot = js.GracePlot(headless=True)
 plot.plot(data, sy=1, li=0, le="synthetic data")
@@ -167,10 +167,10 @@ plot.plot(fit, sy=0, li=1, le="JScatter fit")
 plot.xaxis(label=r"q / nm\S-1\N")
 plot.yaxis(label="I(q)")
 plot.legend()
-plot.save("outputs/jscatter-fit.png", size=(3.4, 2.4), dpi=150)
+plot.save("/workspace/outputs/jscatter-fit.png", size=(3.4, 2.4), dpi=150)
 plot.exit()
 
-Path("outputs/jscatter-fit.json").write_text(
+Path("/workspace/outputs/jscatter-fit.json").write_text(
     json.dumps(
         {
             "jscatter_version": js.__version__,

@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import operator
-from collections.abc import Mapping
+import re
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from typing import Annotated, Any, NotRequired
 
-from langchain.agents.middleware import AgentMiddleware, AgentState
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    AgentState,
+    ModelRequest,
+    ModelResponse,
+    hook_config,
+)
 from langchain.agents.middleware.types import PrivateStateAttr
-from langchain_core.messages import AIMessage, merge_content
+from deepagents.backends.utils import create_file_data
+from langchain_core.messages import AIMessage, HumanMessage, merge_content
 
+from juena_core.agents.backends import FINDINGS_PREFIX
 from juena_core.artifacts import (
     ARTIFACT_MESSAGE_KEY,
     get_artifact_store,
@@ -25,6 +35,9 @@ __all__ = [
     "VERIFIED_CLOSE",
     "OUTCOME_VERIFIED_KEY",
     "NO_REPORT",
+    "REPORT_REMINDER",
+    "TOOL_BUDGET_SPENT",
+    "SAVED_REPORT_MIN_TOOL_CALLS",
     "NO_SUCCESSFUL_RUN",
     "UNVERIFIED_DIRECTIVE",
     "SpecialistOutcomeState",
@@ -32,6 +45,7 @@ __all__ = [
     "SpecialistOutcomeMiddleware",
     "ExecutionEvidenceMiddleware",
     "ArtifactMessageMiddleware",
+    "ReportWhenToolsRunOutMiddleware",
 ]
 
 REPORT_OPEN = "<specialist_report>"
@@ -43,9 +57,16 @@ VERIFIED_CLOSE = "</verified_by_server>"
 OUTCOME_VERIFIED_KEY = "juena_outcome_verified"
 
 NO_REPORT = (
-    "The specialist returned no structured report. Its run ended early -- most "
-    "often because the model-call budget was exhausted -- so nothing it said "
-    "mid-run can be treated as a result."
+    "The specialist returned no structured report, so nothing it said mid-run can "
+    "be treated as a result."
+)
+# Marks the one reminder a specialist gets when it answers in plain text.
+REPORT_REMINDER_KEY = "juena_report_reminder"
+REPORT_REMINDER = (
+    "You replied in plain text, but this task ends only with a SpecialistReport "
+    "tool call. Call SpecialistReport now and reuse what you just wrote. If the "
+    "work is unfinished, use status blocked or failed and say what is missing in "
+    "limitations."
 )
 NO_SUCCESSFUL_RUN = (
     "Every execution in this run failed. No calculation, fit, or plot was produced."
@@ -56,14 +77,21 @@ UNVERIFIED_DIRECTIVE = (
 )
 
 
+TOOL_BUDGET_SPENT = (
+    "The tool budget for this task is spent. Submit the SpecialistReport now with "
+    "what you have established, and list what you could not finish under limitations."
+)
+
+
 class SpecialistOutcomeState(AgentState):
     """Private execution history and per-specialist artifact baseline."""
 
     specialist_initial_artifact_ids: NotRequired[
         Annotated[list[str], PrivateStateAttr]
     ]
+    # LangGraph recognizes a reducer only as the final Annotated metadata item.
     execution_events: NotRequired[
-        Annotated[list[ExecutionEvidence], operator.add, PrivateStateAttr]
+        Annotated[list[ExecutionEvidence], PrivateStateAttr, operator.add]
     ]
 
 
@@ -164,6 +192,7 @@ def _verified_block(
     artifacts: list[ResultArtifactEvidence],
     undelivered: list[tuple[str, str]],
     failures: list[str],
+    saved_note: str | None = None,
 ) -> str:
     lines = [f"{subject_label}: {subject}"]
     if failures:
@@ -176,6 +205,12 @@ def _verified_block(
     if undelivered:
         lines.append("Produced but NOT delivered to the user:")
         lines.extend(f"- {filename}: {reason}" for filename, reason in undelivered)
+    if saved_note:
+        lines.append(
+            f"Report saved for later work: {saved_note} (the server's copy of this "
+            "report; its content is the specialist's, not verified). Name this path "
+            "in the objective when the next delegation builds on this work."
+        )
     if failures:
         lines.append(UNVERIFIED_DIRECTIVE)
     body = "\n".join(lines)
@@ -187,6 +222,67 @@ def _execution_failures(executions: list[ExecutionEvidence]) -> list[str]:
     return [NO_SUCCESSFUL_RUN] if attempted and not any(
         event.succeeded for event in attempted
     ) else []
+
+
+#: Research tool calls a run needs before its report is worth keeping. A single
+#: catalogue lookup is its own answer; rereading it costs nothing.
+SAVED_REPORT_MIN_TOOL_CALLS = 3
+_REPORT_TOOL = SpecialistReport.__name__
+
+
+def _research_tool_calls(messages: list[Any]) -> list[dict[str, Any]]:
+    return [
+        call
+        for message in messages
+        if isinstance(message, AIMessage)
+        for call in message.tool_calls
+        if call["name"] not in (_REPORT_TOOL, "ask_user")
+    ]
+
+
+def _wrote_findings(calls: list[dict[str, Any]]) -> bool:
+    return any(
+        call["name"] in ("write_file", "edit_file")
+        and str(call["args"].get("file_path", "")).startswith(FINDINGS_PREFIX)
+        for call in calls
+    )
+
+
+def _report_title(report: SpecialistReport) -> str:
+    first = next((line for line in report.finding.splitlines() if line.strip()), "")
+    return first.strip().lstrip("#").strip()[:100] or "Specialist report"
+
+
+def _note_path(report: SpecialistReport, files: Mapping[str, Any]) -> str:
+    """`/findings/<slug>.md` from the finding's first line, never overwriting."""
+    words = re.findall(r"[a-z0-9]+", _report_title(report).lower())[:6]
+    stem = "-".join(words)[:50].strip("-") or "report"
+    path, number = f"{FINDINGS_PREFIX}{stem}.md", 2
+    while path in files:
+        path, number = f"{FINDINGS_PREFIX}{stem}-{number}.md", number + 1
+    return path
+
+
+def _report_note(report: SpecialistReport, *, specialist: str, objective: str) -> str:
+    sections = [
+        f"# {_report_title(report)}",
+        f"Saved by the server from the {specialist} report on "
+        f"{datetime.now(UTC):%Y-%m-%d %H:%M} UTC. The specialist wrote this text and "
+        "the server did not verify it: re-check values against the sources it names.",
+        f"Status: {report.status}",
+        "## Objective",
+        objective,
+        "## Finding",
+        report.finding,
+    ]
+    for label, items in (
+        ("Evidence", report.evidence),
+        ("Actions", report.actions),
+        ("Limitations", report.limitations),
+    ):
+        if items:
+            sections.extend([f"## {label}", "\n".join(f"- {item}" for item in items)])
+    return "\n\n".join(sections) + "\n"
 
 
 def _final_ai_message(state: Any) -> AIMessage | None:
@@ -215,6 +311,38 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
 
     async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any]:
         return self.before_agent(state, runtime)
+
+    @hook_config(can_jump_to=["model"])
+    def after_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """Remind a specialist once when it answers without the report tool.
+
+        Some models end with plain text even though the report tool is required.
+        One reminder recovers most of them; a second plain answer still fails
+        closed in after_agent. Tool calls, interrupts, and call-limit endings
+        never reach this point with a plain final message.
+        """
+        values = state if isinstance(state, Mapping) else {}
+        messages = values.get("messages", [])
+        last = messages[-1] if messages else None
+        if not isinstance(last, AIMessage) or last.tool_calls:
+            return None
+        if values.get("structured_response") is not None:
+            return None
+        if any(message.additional_kwargs.get(REPORT_REMINDER_KEY) for message in messages):
+            return None
+        return {
+            "jump_to": "model",
+            "messages": [
+                HumanMessage(
+                    content=REPORT_REMINDER,
+                    additional_kwargs={REPORT_REMINDER_KEY: True},
+                )
+            ],
+        }
+
+    @hook_config(can_jump_to=["model"])
+    async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        return self.after_model(state, runtime)
 
     def _own_artifacts(
         self,
@@ -264,6 +392,7 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
                 }
             )
 
+        note = self._saved_report(report, values)
         package = "\n\n".join(
             [
                 _report_block(report),
@@ -274,10 +403,11 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
                     artifacts=artifacts,
                     undelivered=undelivered,
                     failures=failures,
+                    saved_note=next(iter(note), None),
                 ),
             ]
         )
-        return {
+        update: dict[str, Any] = {
             "structured_response": None,
             "messages": [
                 AIMessage(
@@ -286,6 +416,35 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
                 )
             ],
         }
+        if note:
+            update["files"] = note
+        return update
+
+    def _saved_report(
+        self, report: SpecialistReport | None, values: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Keep a real piece of work in `/findings/` so the next task can build on it.
+
+        Whether a finding gets written used to rest on the supervisor asking for
+        one, and a model judging that call skipped it after long research. A
+        report the specialist already filed as its own note, a short lookup, and
+        an agent without a `files` channel are left alone.
+        """
+        files = values.get("files")
+        messages = values.get("messages") or []
+        calls = _research_tool_calls(messages)
+        if (
+            report is None
+            or not isinstance(files, Mapping)
+            or len(calls) < SAVED_REPORT_MIN_TOOL_CALLS
+            or _wrote_findings(calls)
+        ):
+            return {}
+        objective = next(
+            (str(m.content) for m in messages if isinstance(m, HumanMessage)), ""
+        )
+        content = _report_note(report, specialist=self._specialist_name, objective=objective)
+        return {_note_path(report, files): create_file_data(content)}
 
     async def aafter_agent(self, state: Any, runtime: Any) -> dict[str, Any]:
         return self.after_agent(state, runtime)
@@ -391,3 +550,49 @@ class ArtifactMessageMiddleware(AgentMiddleware):
         runtime: Any,
     ) -> dict[str, Any] | None:
         return self.after_agent(state, runtime)
+
+
+class ReportWhenToolsRunOutMiddleware(AgentMiddleware):
+    """Turn a spent tool budget into a report instead of an empty run.
+
+    ``ToolCallLimitMiddleware(exit_behavior="continue")`` only refuses further
+    tool calls, so a model that keeps reaching for tools never finishes, and a
+    run cut off without a report loses everything it found. Near the limit,
+    every model call may only submit the structured report: with
+    ``ToolStrategy`` LangChain adds the report tool to the request's tools and
+    forces a tool call, so emptying the tools leaves the report as the only
+    choice.
+
+    The limit counts the report call too, and refuses every call once reached,
+    so the report is forced ``REPORT_RESERVE`` calls early. The reserve covers
+    parallel calls in the last research step and a retried report.
+    """
+
+    REPORT_RESERVE = 10
+
+    def __init__(self, tool_call_limit: int) -> None:
+        super().__init__()
+        self.tool_call_limit = tool_call_limit
+
+    def _report_only(self, request: ModelRequest) -> ModelRequest:
+        spent = request.state.get("run_tool_call_count", {}).get("__all__", 0)
+        if spent < self.tool_call_limit - self.REPORT_RESERVE:
+            return request
+        return request.override(
+            tools=[],
+            messages=[*request.messages, HumanMessage(content=TOOL_BUDGET_SPENT)],
+        )
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        return handler(self._report_only(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Any],
+    ) -> ModelResponse:
+        return await handler(self._report_only(request))

@@ -26,6 +26,8 @@ from juena_core.agents.backends import (
     FindingsStateBackend,
     ReadOnlyFilesystemBackend,
 )
+from juena_core.filesystem.service import get_filesystem
+from juena_core.filesystem.backend import ConversationBackend
 from juena_core.config import settings as core_settings
 from juena_core.runtime_context import _context_value
 from juena_core.sandbox.backend import PodmanSandboxBackend, ReadOnlySandboxInputsBackend
@@ -90,6 +92,8 @@ _workspace_store: WorkspaceStore | None = None
 
 def get_workspace_store() -> WorkspaceStore:
     global _workspace_store
+    if get_filesystem() is not None:
+        return get_filesystem().store
     config = sandbox_settings()
     if _workspace_store is None or _workspace_store.root != config.workspace_root:
         _workspace_store = WorkspaceStore(
@@ -204,6 +208,9 @@ def build_sandbox_backend(
         # which runs with no sandbox at all.
         FINDINGS_PREFIX: FindingsStateBackend(),
     }
+    if get_filesystem() is not None:
+        routes["/workspace/"] = ConversationBackend(writable=True)
+        routes["/inputs/"] = ConversationBackend(root="/inputs")
     if repo_cache_root is not None:
         routes["/repos/"] = ReadOnlyFilesystemBackend(
             root_dir=repo_cache_root,
@@ -222,7 +229,7 @@ def build_sandbox_backend(
         # Deep Agents stores oversized tool output and conversation summaries
         # beneath this root. The sandbox root filesystem is intentionally
         # read-only; `/workspace` is its only writable area.
-        artifacts_root="/workspace",
+        artifacts_root="/workspace/.scratch",
     )
 
 
@@ -232,6 +239,21 @@ async def stage_runtime_inputs(
     thread_id: str,
     files: dict[str, Any],
 ) -> None:
+    filesystem = get_filesystem()
+    if filesystem is not None:
+        thread_files = filesystem.for_thread(user_id, thread_id)
+        def stage_shared():
+            with thread_files.guard():
+                filesystem.assert_idle(thread_files.workspace_id)
+                thread_files.migrate(files)
+                aliases = thread_files.aliases()
+                staged = [(path, file_data_to_string(data).encode("utf-8"))
+                          for path, data in files.items()
+                          if path.startswith("/inputs/") and data is not None and path not in aliases]
+                staged.extend((old, thread_files.read(new, {})) for old, new in thread_files.aliases(live_only=True).items())
+                thread_files.store.stage_inputs(thread_files.workspace_id, thread_files.tenant_id, staged)
+        await asyncio.to_thread(stage_shared)
+        return
     if not sandbox_enabled():
         return
     secret = sandbox_settings().identity_secret
@@ -256,6 +278,8 @@ async def stage_runtime_inputs(
 
 
 async def delete_runtime_workspace(*, user_id: str, thread_id: str) -> None:
+    if get_filesystem() is not None:
+        return
     if not sandbox_enabled():
         return
     secret = sandbox_settings().identity_secret

@@ -41,6 +41,9 @@ __all__ = [
     "finalize_streaming_message",
     "render_attachment_chips",
     "should_collapse_tool_payload",
+    "activity_line",
+    "activity_summary",
+    "render_activity",
 ]
 
 PLOT_PREVIEW_WIDTH_PX = 720
@@ -66,6 +69,17 @@ _DEAD_SCHEME_LINK_RE = re.compile(
     r"\[([^\]\n]*)\]\(\s*(?:sandbox|file):[^)\n]*\)",
     flags=re.IGNORECASE,
 )
+
+# The icon in front of a step, by state. A step without a state is a note an
+# application wrote -- why a sandbox run failed, say -- and gets no icon.
+_STEP_ICONS = {
+    "running": ":material/pending:",
+    "done": ":green[:material/check_circle:]",
+    "failed": ":red[:material/cancel:]",
+}
+# Marks a specialist's steps as belonging to the line that asked it. Not an
+# indent: `st.markdown` strips leading whitespace, non-breaking spaces too.
+_NESTED_MARK = "↳ "
 
 
 def sanitize_assistant_content(content: Any) -> Any:
@@ -203,7 +217,7 @@ def _claim_artifact_key(artifact: dict[str, Any], filename: str) -> str | None:
 
 
 def render_artifacts(custom_data: dict[str, Any] | None) -> None:
-    """Render plots and authenticated downloads beneath the assistant response."""
+    """Render plots and records; ordinary downloads belong in a mounted explorer."""
     artifacts = (custom_data or {}).get("artifacts") or []
     if not isinstance(artifacts, list):
         return
@@ -215,6 +229,14 @@ def render_artifacts(custom_data: dict[str, Any] | None) -> None:
 
     prepared: list[tuple[dict[str, Any], str, str]] = []
     for artifact in ordered:
+        # The explorer owns ordinary files; keep plots and execution snapshots
+        # in the transcript. Apps without the explorer still need downloads.
+        if (
+            st.session_state.get("filesystem_scope")
+            and artifact.get("kind") != "image"
+            and artifact.get("category") != "record"
+        ):
+            continue
         filename = str(artifact.get("filename") or "result.txt")
         key = _claim_artifact_key(artifact, filename)
         if key is not None:
@@ -233,6 +255,8 @@ def render_artifacts(custom_data: dict[str, Any] | None) -> None:
         artifact = item[0]
         group_id = str(artifact.get("group_id") or "").strip()
         group_label = str(artifact.get("group_label") or "Artifacts").strip()
+        if artifact.get("category") == "record":
+            group_id, group_label = "__execution_records__", "Execution details"
         if not group_id and artifact.get("kind") != "image" and ungrouped_downloads > 1:
             group_id = "__ungrouped_downloads__"
             group_label = "Generated files"
@@ -337,6 +361,41 @@ def render_attachment_chips(custom_data: dict[str, Any] | None) -> None:
         st.caption(" · ".join(labels))
 
 
+def activity_line(step: dict[str, Any]) -> str:
+    """Markdown for one step of a turn's activity log."""
+
+    label = str(step.get("label") or "")
+    icon = _STEP_ICONS.get(step.get("state"))
+    line = f"{icon} {label}" if icon else label
+    return f"{_NESTED_MARK}{line}" if step.get("nested") else line
+
+
+def activity_summary(activity: dict[str, Any]) -> str:
+    """The label of a finished turn's log, e.g. "Worked for 41 s · 4 steps"."""
+
+    seconds = round(activity.get("seconds") or 0)
+    duration = f"{seconds} s" if seconds < 60 else f"{seconds // 60} min {seconds % 60} s"
+    count = sum(1 for step in activity.get("steps") or () if step.get("state"))
+    if not count:
+        return f"Worked for {duration}"
+    return f"Worked for {duration} · {count} {'step' if count == 1 else 'steps'}"
+
+
+def render_activity(custom_data: dict[str, Any] | None) -> None:
+    """Draw the steps a turn took, collapsed, above its answer.
+
+    The log is kept on the message only for this browser session; a chat
+    loaded from the server has none, and shows none.
+    """
+
+    activity = (custom_data or {}).get("activity")
+    if not isinstance(activity, dict) or not activity.get("steps"):
+        return
+    with st.expander(activity_summary(activity), icon=":material/check:", expanded=False):
+        for step in activity["steps"]:
+            st.markdown(activity_line(step))
+
+
 def render_message(message: ChatMessage, show_system: bool = False) -> None:
     """Render one chat message with consistent styling.
 
@@ -357,6 +416,7 @@ def render_message(message: ChatMessage, show_system: bool = False) -> None:
 
     elif message.type == "ai":
         with st.chat_message("assistant"):
+            render_activity(message.custom_data)
             if message.content:
                 render_content(sanitize_assistant_content(message.content))
             render_artifacts(message.custom_data)

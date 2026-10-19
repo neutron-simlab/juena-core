@@ -1,0 +1,44 @@
+:host { color: var(--st-text-color, #3f3f46); font-family: var(--st-font, sans-serif); font-size: 13px; }
+* { box-sizing: border-box; }
+.explorer { container-type: inline-size; border: 1px solid var(--st-border-color, #e2e5e9); border-radius: 10px; background: var(--st-background-color, #fff); padding: 10px; position: relative; min-width: 0; }
+button { color: inherit; font: inherit; cursor: pointer; background: transparent; border: 1px solid var(--st-border-color, #e2e5e9); border-radius: 6px; padding: 6px 8px; }
+button:hover { background: #eef5ff; color: #173f72; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible { outline: 2px solid #5286bd; outline-offset: 2px; }
+.heading { display: flex; justify-content: space-between; font-size: 17px; font-weight: 600; border: 0; width: 100%; padding: 2px; }
+.caption { font-size: 12px; color: #707785; line-height: 1.5; margin: 8px 0; }
+.breadcrumbs { display: flex; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+.breadcrumbs button { border: 0; padding: 3px 1px; overflow-wrap: anywhere; }
+.file-path { user-select: text; overflow-wrap: anywhere; font-size: 12px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin: 8px 0; }
+.directory { max-height: 36vh; overflow-y: auto; border-block: 1px solid #e8eaee; padding: 5px 0; }
+.entry { display: flex; gap: 7px; align-items: center; width: 100%; border: 0; text-align: left; padding: 8px 4px; }
+.filename { min-width: 0; overflow-wrap: anywhere; flex: 1; }
+.metadata { display: none; color: #707785; white-space: nowrap; }
+.metadata span { display: block; }
+@container (min-width: 380px) { .metadata { display: block; } }
+.notice { border-left: 3px solid #80a9d3; background: #eff5fc; color: #254b71; padding: 8px; overflow-wrap: anywhere; font-size: 12px; }
+.preview { border-top: 1px solid #d7dce3; margin-top: 12px; padding-top: 8px; }
+.file-path { display: block; margin: 7px 0; }
+.editor { width: 100%; height: 340px; border: 1px solid #e2e5e9; border-radius: 5px; }
+.image { width: 100%; object-fit: contain; }
+.primary, button[aria-pressed="true"] { background: #e2efff; color: #174771; font-weight: 600; }
+.markdown { height: 340px; overflow: auto; border: 1px solid #e2e5e9; border-radius: 5px; padding: 2px 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.markdown h1 { font-size: 18px; } .markdown h2 { font-size: 16px; } .markdown h3, .markdown h4 { font-size: 14px; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 { margin: 14px 0 6px; line-height: 1.3; }
+.markdown code { font-size: 12px; background: #f3f4f6; border-radius: 3px; padding: 1px 4px; }
+.markdown pre { background: #f6f8fa; border-radius: 5px; padding: 8px; overflow-x: auto; }
+.markdown pre code { background: none; padding: 0; }
+.markdown table { border-collapse: collapse; display: block; overflow-x: auto; margin: 8px 0; }
+.markdown th, .markdown td { border: 1px solid #e2e5e9; padding: 4px 8px; text-align: left; }
+.markdown blockquote { border-left: 3px solid #d7dce3; color: #5b6170; margin: 8px 0; padding-left: 10px; }
+.markdown img { max-width: 100%; }
+/* A page can give the panel a height through --juena-files-height, which
+   inherits into this shadow root. With a file open, the panel is at least that
+   tall and the file view takes whatever the controls around it leave.
+   Unset, the panel sizes to its content as before. */
+.file-open { display: flex; flex-direction: column; min-height: var(--juena-files-height, auto); }
+.file-open > *, .file-open .preview > * { flex-shrink: 0; }
+.file-open .preview { flex-grow: 1; display: flex; flex-direction: column; }
+.file-open .editor, .file-open .markdown { flex-grow: 1; }
+.confirm { position: sticky; bottom: 10px; background: #fff8e8; color: #433b24; border: 1px solid #ddc99a; border-radius: 7px; padding: 10px; z-index: 10; box-shadow: 0 4px 15px #0002; }
