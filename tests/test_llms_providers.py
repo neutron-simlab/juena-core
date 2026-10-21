@@ -30,13 +30,11 @@ def make_settings(**overrides: object) -> CoreSettings:
         "DATABASE_URL": None,
         "DATABASE_POOL_MAX_SIZE": 20,
         "SESSION_TTL_HOURS": 8,
-        "SESSION_COOKIE_SECURE": False,
         "FALLBACK_PROVIDER": None,
         "EXECUTE_TIMEOUT_SECONDS": 600,
         "ARTIFACT_ROOT": Path("/tmp/artifacts"),
         "AUDIT_FILE": Path("/tmp/audit.jsonl"),
         "LOG_LEVEL": "INFO",
-        "LOG_DIR": Path("/tmp/logs"),
         "BIND_HOST": "127.0.0.1",
         "API_PUBLISHED": False,
     }

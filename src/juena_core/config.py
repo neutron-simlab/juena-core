@@ -41,7 +41,6 @@ class CoreSettings:
     DATABASE_POOL_MAX_SIZE: int
 
     SESSION_TTL_HOURS: int
-    SESSION_COOKIE_SECURE: bool
 
     FALLBACK_PROVIDER: str | None
     EXECUTE_TIMEOUT_SECONDS: int
@@ -50,7 +49,6 @@ class CoreSettings:
     AUDIT_FILE: Path
 
     LOG_LEVEL: str
-    LOG_DIR: Path
 
     BIND_HOST: str
     API_PUBLISHED: bool

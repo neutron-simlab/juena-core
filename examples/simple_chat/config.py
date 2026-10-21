@@ -57,13 +57,11 @@ def build_settings(environ: Mapping[str, str] | None = None) -> CoreSettings:
         ),
         DATABASE_POOL_MAX_SIZE=5,
         SESSION_TTL_HOURS=24,
-        SESSION_COOKIE_SECURE=False,
         FALLBACK_PROVIDER=None,
         EXECUTE_TIMEOUT_SECONDS=300,
         ARTIFACT_ROOT=data_dir / "artifacts",
         AUDIT_FILE=data_dir / "audit.jsonl",
         LOG_LEVEL=env.get("LOG_LEVEL", "INFO"),
-        LOG_DIR=data_dir / "logs",
         BIND_HOST="127.0.0.1",
         API_PUBLISHED=False,
     )
