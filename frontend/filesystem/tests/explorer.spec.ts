@@ -236,8 +236,14 @@ test('persistent header, rerun drafts and no idle polling', async ({ page }) => 
   await panel(page).getByRole('button', { name: 'Files', exact: true }).click();
   await expect(panel(page).getByRole('button', { name: 'Files', exact: true })).toHaveAttribute('aria-expanded', 'false');
   await expect(editor(page)).toHaveCount(0);
+  // The rerun re-lists the open folder once. Wait for that answer before counting:
+  // "not busy" can be true before the re-list has even started, and then it lands
+  // inside the idle window below and looks like polling.
+  const relisted = page.waitForResponse((response) =>
+    response.url().includes('/threads/one/filesystem?path=%2Fworkspace'));
   await page.getByRole('button', { name: 'Rerun page', exact: true }).click();
   await panel(page).getByRole('button', { name: 'Files', exact: true }).click();
+  await relisted;
   await expect.poll(() => value(page)).toBe('keep this draft\n');
   await expect(panel(page).locator('.directory')).toHaveAttribute('aria-busy', 'false');
   const count = (await stats(page)).filesystem_requests;
