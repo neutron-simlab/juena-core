@@ -58,13 +58,11 @@ def make_settings(**overrides: object) -> CoreSettings:
         "DATABASE_URL": DSN,
         "DATABASE_POOL_MAX_SIZE": 5,
         "SESSION_TTL_HOURS": 8,
-        "SESSION_COOKIE_SECURE": False,
         "FALLBACK_PROVIDER": None,
         "EXECUTE_TIMEOUT_SECONDS": 600,
         "ARTIFACT_ROOT": Path("/tmp/juena-core-route-artifacts"),
         "AUDIT_FILE": Path("/tmp/juena-core-route-artifacts/audit.jsonl"),
         "LOG_LEVEL": "INFO",
-        "LOG_DIR": Path("/tmp/juena-core-route-logs"),
         "BIND_HOST": "127.0.0.1",
         "API_PUBLISHED": False,
     }

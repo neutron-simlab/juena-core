@@ -10,7 +10,7 @@ domain tools, authentication provider, retrieval system, or deployment
 policy. An application selects the modules it needs and supplies those parts.
 The dependency always points inward: `juena_core` never imports an application.
 
-> `juena-core` is currently `0.1.x`. Keep a committed dependency lock and run
+> `juena-core` is currently `1.0.x`. Keep a committed dependency lock and run
 > the application test suite when updating it. The LangChain MCP API is beta
 > and is isolated in `juena_core.mcp` for that reason.
 
