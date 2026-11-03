@@ -263,3 +263,13 @@ async def test_streamed_specialist_call_keeps_report_tool_call_and_usage(monkeyp
     assert result["structured_response"].finding == "The value is 17."
     model_reply = next(m for m in result["messages"] if getattr(m, "tool_calls", None))
     assert model_reply.usage_metadata["input_tokens"] == 11
+
+
+def test_blablador_accepts_lazy_personal_key_supplier(monkeypatch):
+    async def personal_key():
+        raise AssertionError("Must not resolve keys while building the shared graph")
+    config = make_settings(BLABLADOR_API_KEY=personal_key, BLABLADOR_BASE_URL="https://models.invalid/v1")
+    monkeypatch.setattr(providers, "settings", lambda: config)
+    assert providers.get_available_providers()["blablador"] is True
+    kwargs = providers._model_kwargs("blablador", "mock", 0.0, {})
+    assert kwargs["api_key"] is personal_key

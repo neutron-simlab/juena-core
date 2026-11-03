@@ -90,3 +90,39 @@ async def test_required_discovery_wraps_adapter_failures(
         match="VITESS MCP discovery failed: connection refused",
     ):
         await mcp.discover_tools("http://mcp.invalid/mcp", label="VITESS")
+
+
+@pytest.mark.asyncio
+async def test_personal_tool_checks_mcp_errors_and_does_not_retain_target(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    call = AsyncMock(return_value=SimpleNamespace(structured_content={"docs": "result"}))
+    class PersonalAdapter(_Adapter):
+        client = SimpleNamespace(call_tool=call)
+        async def list_tools(self):
+            return [SimpleNamespace(name="context7_query-docs")]
+    monkeypatch.setattr(mcp, "_load_adapter_class", lambda: PersonalAdapter)
+    target = {"headers": {"Authorization": "fake-secret"}}
+    assert await mcp.call_personal_tool(target, "query-docs", {"query": "test"}) == {"docs": "result"}
+    call.assert_awaited_once_with("context7_query-docs", {"query": "test"}, raise_on_error=True)
+    call.side_effect = RuntimeError("fake-secret")
+    with pytest.raises(mcp.MCPUnavailableError) as error:
+        await mcp.call_personal_tool(target, "query-docs", {})
+    assert "fake-secret" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_personal_call_with_real_mcp_protocol():
+    from fastmcp import FastMCP
+    server = FastMCP("personal-call-test")
+    @server.tool(name="query-docs")
+    def docs(query: str) -> str:
+        return f"Documentation for {query}"
+    result = await mcp.call_personal_tool(server, "query-docs", {"query": "python"})
+    assert "Documentation for python" in str(result)
+    @server.tool(name="broken")
+    def broken() -> str:
+        raise ValueError("upstream-secret")
+    with pytest.raises(mcp.MCPUnavailableError) as error:
+        await mcp.call_personal_tool(server, "broken", {})
+    assert "upstream-secret" not in str(error.value)

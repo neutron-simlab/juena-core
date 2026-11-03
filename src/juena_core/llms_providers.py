@@ -42,7 +42,7 @@ def _is_available(provider: str) -> bool:
         return bool((config.OPENAI_API_KEY or "").strip())
     if provider == Provider.BLABLADOR.value:
         return bool(
-            (config.BLABLADOR_API_KEY or "").strip()
+            (callable(config.BLABLADOR_API_KEY) or (config.BLABLADOR_API_KEY or "").strip())
             and (config.BLABLADOR_BASE_URL or "").strip()
         )
     return False

@@ -48,13 +48,34 @@ from langchain_core.tools import BaseTool
 
 from juena_core.log import get_logger
 
-__all__ = ["MCPUnavailableError", "discover_tools", "discover_optional_tools"]
+__all__ = ["MCPUnavailableError", "discover_tools", "discover_optional_tools", "call_personal_tool"]
 
 logger = get_logger(__name__)
 
 
 class MCPUnavailableError(RuntimeError):
     """An MCP server whose tools are required could not be reached."""
+
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def call_personal_tool(target: Any, name: str, arguments: dict[str, Any]) -> Any:
+    """Use a request-owned MCP connection without retaining its auth configuration.
+
+    Do not interpolate upstream errors: they may contain authentication headers.
+    """
+    try:
+        async with _load_adapter_class()(target) as adapter:
+            tools = await adapter.list_tools()
+            selected = next(t for t in tools if t.name == name or t.name.endswith("_" + name))
+            result = await adapter.client.call_tool(selected.name, arguments, raise_on_error=True)
+            return result.structured_content or [block.model_dump(exclude_none=True) for block in result.content]
+    except Exception as error:
+        status_code = getattr(getattr(error, "response", None), "status_code", None)
+        raise MCPUnavailableError("The documentation service could not complete the request.",
+                                  status_code=status_code) from None
 
 
 def _load_adapter_class() -> type[Any]:

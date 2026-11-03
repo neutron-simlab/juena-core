@@ -210,6 +210,8 @@ class PreparedAgentInvocation:
 def build_api_router(
     principal: PrincipalDependency,
     *,
+    invocation_guard: Callable[[Principal, str | None], Awaitable[None]] | None = None,
+    invocation_error: Callable[[Exception], str | None] | None = None,
     resume_input: type[BaseModel] = ClarificationResumeInput,
     workspace: ThreadWorkspace | None = None,
     filesystem: ConversationFilesystem | None = None,
@@ -222,6 +224,10 @@ def build_api_router(
 
     Args:
         principal: The identity dependency every route authenticates with.
+        invocation_guard: Optional async application readiness check, receiving
+            the principal and requested provider. Read-only routes bypass it.
+        invocation_error: Optional mapper for safe application-specific error messages;
+            return None to retain the standard error handling.
         resume_input: The application's discriminated resume union. Core's
             default is the clarification arm alone, which is the whole truth
             for an application with no other interrupt kind — a union offering
@@ -493,9 +499,11 @@ def build_api_router(
         except StreamingError as e:
             logger.error(f"Streaming error: {e}")
             yield _sse(events.error_event(f"Streaming error: {e.message}"))
-        except Exception:
-            logger.exception("Unexpected error in message generator")
-            yield _sse(events.error_event("Internal server error"))
+        except Exception as exc:
+            safe_message = invocation_error(exc) if invocation_error else None
+            if safe_message is None:
+                logger.exception("Unexpected error in message generator")
+            yield _sse(events.error_event(safe_message or "Internal server error"))
 
     async def resume_generator(
         payload: Any,
@@ -533,9 +541,11 @@ def build_api_router(
             yield _sse(events.error_event(str(exc)))
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("Unexpected error resuming an interrupted turn")
-            yield _sse(events.error_event("Unable to resume this turn"))
+        except Exception as exc:
+            safe_message = invocation_error(exc) if invocation_error else None
+            if safe_message is None:
+                logger.exception("Unexpected error resuming an interrupted turn")
+            yield _sse(events.error_event(safe_message or "Unable to resume this turn"))
 
     @router.post(
         "/{agent_id}/stream",
@@ -555,6 +565,8 @@ def build_api_router(
         absent a new thread is created and reported by the first event.
         """
 
+        if invocation_guard is not None:
+            await invocation_guard(user, user_input.provider)
         resolved = _resolve_agent_id(agent_id)
         user_input.thread_id, lease = await _reserve_authorized_thread(
             session, user, user_input.thread_id, resolved
@@ -588,7 +600,6 @@ def build_api_router(
     ) -> EventSourceResponse:
         """Stream an agent response from multipart form data and text attachments."""
 
-        resolved = _resolve_agent_id(agent_id)
         user_input = StreamInput(message=message, thread_id=_form_field(thread_id))
         if (provider_value := _form_field(provider)) is not None:
             try:
@@ -599,6 +610,9 @@ def build_api_router(
                 ) from e
         if (model_value := _form_field(model)) is not None:
             user_input.model = model_value
+        if invocation_guard is not None:
+            await invocation_guard(user, user_input.provider)
+        resolved = _resolve_agent_id(agent_id)
         user_input.thread_id, lease = await _reserve_authorized_thread(
             session, user, user_input.thread_id, resolved
         )
@@ -626,6 +640,8 @@ def build_api_router(
     ) -> EventSourceResponse:
         """Resume a pending interrupt after an authenticated reply."""
 
+        if invocation_guard is not None:
+            await invocation_guard(user, getattr(payload, "provider", None))
         resolved = _resolve_agent_id(agent_id)
         if not thread_activity.reserve_run(payload.thread_id):
             raise HTTPException(status_code=409, detail="Thread deletion is in progress")
