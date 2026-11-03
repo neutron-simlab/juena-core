@@ -8,6 +8,7 @@ during startup.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 __all__ = ["CoreSettings", "configure", "settings"]
@@ -23,7 +24,9 @@ class CoreSettings:
     """
 
     OPENAI_API_KEY: str | None
-    BLABLADOR_API_KEY: str | None
+    # A supplier is evaluated by the asynchronous model client per request.
+    # Applications own identity lookup; core never stores personal credentials.
+    BLABLADOR_API_KEY: str | Callable[[], Awaitable[str]] | None
     BLABLADOR_BASE_URL: str | None
     MAX_TOKENS: int
     TIMEOUT_SECONDS: int

@@ -39,7 +39,7 @@ So an application's ``service.py`` is roughly::
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Collection, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
@@ -63,6 +63,7 @@ from juena_core.server.database.checkpointer import checkpointer_lifespan
 from juena_core.server.database.connection import database_lifespan
 from juena_core.server.database.store import store_lifespan
 from juena_core.server.identity import (
+    Principal,
     PrincipalDependency,
     ensure_principal_row,
     fixed_principal,
@@ -85,6 +86,8 @@ __all__ = [
 def create_app(
     *,
     principal: PrincipalDependency,
+    invocation_guard: Callable[[Principal, str | None], Awaitable[None]] | None = None,
+    invocation_error: Callable[[Exception], str | None] | None = None,
     resume_input: type[BaseModel] = ClarificationResumeInput,
     workspace: ThreadWorkspace | None = None,
     filesystem: ConversationFilesystem | None = None,
@@ -103,6 +106,10 @@ def create_app(
     Args:
         principal: The identity dependency every route authenticates with.
             A real provider's, or :func:`~juena_core.server.identity.local_principal`.
+        invocation_guard: Optional async check called with the principal and
+            requested provider before a new or resumed invocation is reserved.
+        invocation_error: Optional mapper for safe application-specific error messages;
+            return None to retain the standard error handling.
         resume_input: The application's discriminated resume union.
         workspace: Where a thread's staged files are materialised, if anywhere.
         filesystem: Shared persistent conversation files, independent of execution.
@@ -190,6 +197,8 @@ def create_app(
     app.include_router(
         build_api_router(
             principal,
+            invocation_guard=invocation_guard,
+            invocation_error=invocation_error,
             resume_input=resume_input,
             workspace=workspace,
             filesystem=filesystem,

@@ -14,6 +14,24 @@ The dependency always points inward: `juena_core` never imports an application.
 > the application test suite when updating it. The LangChain MCP API is beta
 > and is isolated in `juena_core.mcp` for that reason.
 
+## Personal credentials in embedding applications
+
+`CoreSettings.BLABLADOR_API_KEY` accepts a string or an async zero-argument
+supplier returning the current caller's key. The async model client invokes the
+supplier for each outbound request, including retries, fallbacks and summarizers.
+The application owns credential storage, endpoint binding and authenticated
+runtime lookup. Never put plaintext keys in graph state or persisted config.
+Applications using a supplier must invoke their agents asynchronously.
+
+`create_app` accepts optional `invocation_guard(principal, provider)` and
+`invocation_error(exception)` callbacks. The async guard runs before stream and
+resume admission; read-only routes remain accessible. The error mapper returns a
+safe message or `None` to retain normal error handling. Existing applications
+that omit these callbacks keep their current behavior.
+
+`juena_core.mcp.call_personal_tool` uses a request-owned MCP connection, checks
+remote tool errors, and omits upstream exception text that may contain secrets.
+
 ## Try the chatbot demo
 
 [`examples/simple_chat`](examples/simple_chat) is a runnable, local-only
