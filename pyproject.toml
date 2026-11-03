@@ -70,3 +70,8 @@ filterwarnings = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/juena_core"]
 artifacts = ["src/juena_core/ui/filesystem_dist/*"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/frontend/filesystem", "/hatch_build.py", "/pyproject.toml", "/README.md", "/scripts", "/tests"]
