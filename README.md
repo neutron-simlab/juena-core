@@ -51,9 +51,11 @@ not a production login mechanism.
 
 ## Install in an application
 
-Python 3.11 or newer is required. The current distribution model is a sibling
-checkout. Declare the base package for the agent, server, schemas, and HTTP
-client, then select only the extras the application uses:
+Python 3.11 or newer is required. Source installs also require Node.js 24 and
+npm: the wheel build compiles and includes the Files panel automatically.
+Installing an already-built wheel needs no Node.js. Declare the base package
+for the agent, server, schemas, and HTTP client, then select only the extras
+the application uses:
 
 ```toml
 [project]
@@ -66,15 +68,15 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-juena-core = { path = "../juena-core" }
+juena-core = { git = "https://github.com/neutron-simlab/juena-core.git", rev = "<full-commit-sha>" }
 ```
 
-Keep exactly one of those dependency lines, then run `uv lock` and commit the
-application's `uv.lock`. A path source does not
-pin the contents of `../juena-core`; for a reproducible team or CI build, use
-an immutable Git commit/tag or a published package. For a personal Docker
-build, at minimum build from a clean core tree and record its commit SHA and
-the resulting image digest.
+Keep exactly one of those dependency lines, replace the revision with a published
+commit, then run `uv lock` and commit the application's `uv.lock`. A sibling
+checkout remains useful when editing core itself, but consumers do not need one.
+Before publishing core changes, run `scripts/check-imports.sh`, the core tests,
+and `uv build`. Source distributions include the frontend sources and lockfile;
+wheels include the generated JavaScript and CSS.
 
 ## Choose the pieces you need
 
