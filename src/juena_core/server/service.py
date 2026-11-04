@@ -51,6 +51,7 @@ from juena_core.filesystem.api import build_filesystem_router
 from juena_core.log import get_logger
 from juena_core.schema.interrupts import ClarificationResumeInput
 from juena_core.schema.server import HealthStatus
+from juena_core.schema.upload_limits import UploadPolicy
 from juena_core.server.agent.registry import shutdown_agents
 from juena_core.server.api.endpoints import (
     DEFAULT_CLOSING_NOTE,
@@ -96,6 +97,7 @@ def create_app(
     stream_policy: StreamPolicy | None = None,
     closing_note: str = DEFAULT_CLOSING_NOTE,
     allowed_suffixes: Collection[str] | None = None,
+    upload_policy: UploadPolicy | None = None,
     title: str = "juena-core",
     version: str = "0.1.0",
     extra_routers: Sequence[APIRouter] = (),
@@ -118,7 +120,8 @@ def create_app(
         thread_activity: Guard shared with application routes that write thread data.
         stream_policy: Custom stream event types and silent tools.
         closing_note: Last paragraph of a staged-input manifest.
-        allowed_suffixes: Upload extensions this application accepts.
+        allowed_suffixes: Legacy text upload extensions this application accepts.
+        upload_policy: Optional text/binary upload policy; mutually exclusive with allowed_suffixes.
         title: Application name, shown in ``/health``.
         version: Application version, shown in ``/health``.
         extra_routers: Routers the application adds — authentication, research,
@@ -206,6 +209,7 @@ def create_app(
             stream_policy=stream_policy,
             closing_note=closing_note,
             allowed_suffixes=allowed_suffixes,
+            upload_policy=upload_policy,
         )
     )
     if filesystem is not None:

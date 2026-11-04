@@ -120,9 +120,11 @@ def _format_upload_manifest_entry(
     *,
     staged_path: str,
     original_filename: str,
-    char_count: int,
+    char_count: int | None,
+    size_bytes: int | None = None,
 ) -> str:
-    return f"{index}. `{staged_path}` (from {original_filename}, {char_count} chars)"
+    size = f"{char_count} chars" if char_count is not None else f"{size_bytes} bytes"
+    return f"{index}. `{staged_path}` (from {original_filename}, {size})"
 
 
 def build_uploads_manifest(
@@ -150,6 +152,7 @@ def build_uploads_manifest(
                 staged_path=upload.staged_path,
                 original_filename=upload.original_filename,
                 char_count=upload.char_count,
+                size_bytes=upload.size_bytes,
             )
             for index, upload in enumerate(new_uploads)
         ]
@@ -175,6 +178,7 @@ def build_uploads_manifest(
                     staged_path=upload.staged_path,
                     original_filename=upload.original_filename,
                     char_count=upload.char_count,
+                    size_bytes=upload.size_bytes,
                 )
             )
             continue
@@ -253,10 +257,7 @@ def build_inputs_manifest(
         lines.append("- /inputs/current_error.txt")
 
     for attachment in attachments:
-        lines.append(
-            f"- {attachment.staged_path} "
-            f"(from {attachment.original_filename}, {attachment.char_count} chars)"
-        )
+        lines.append(f"- {attachment.staged_path} ({attachment.description})")
 
     lines.extend(["", closing_note])
     return "\n".join(lines).replace("/inputs/uploads/", uploads_prefix)

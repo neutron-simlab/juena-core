@@ -69,6 +69,8 @@ class ConversationBackend(BackendProtocol):
                 content = files.read(self._full(file_path), self._state_files(), limit=10 * 1024 * 1024 + 1)
                 if len(content) > 10 * 1024 * 1024:
                     raise ValueError("File is too large for text tools; use sandboxed processing")
+                if b"\x00" in content:
+                    raise ValueError("Binary files cannot be read with text tools; use sandboxed processing")
                 text = content.decode("utf-8")
                 return slice_read_response(create_file_data(text), offset, limit)
         except (OSError, ValueError, RuntimeError) as exc:

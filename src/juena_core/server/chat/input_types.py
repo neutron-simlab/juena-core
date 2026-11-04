@@ -14,7 +14,24 @@ class UploadedAttachment:
 
     original_filename: str
     staged_path: str
-    char_count: int
+    char_count: int | None = None
+    size_bytes: int | None = None
+    media_type: str | None = None
+
+    @property
+    def description(self) -> str:
+        size = f"{self.char_count} chars" if self.char_count is not None else f"{self.size_bytes} bytes"
+        return f"from {self.original_filename}, {size}"
+
+    def display_metadata(self) -> dict[str, Any]:
+        metadata: dict[str, Any] = {"name": self.original_filename}
+        if self.char_count is not None:
+            metadata["chars"] = self.char_count
+        if self.size_bytes is not None:
+            metadata["size_bytes"] = self.size_bytes
+        if self.media_type is not None:
+            metadata["media_type"] = self.media_type
+        return metadata
 
 
 @dataclass(frozen=True)

@@ -14,7 +14,7 @@ from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any
 
-from deepagents.backends.utils import create_file_data, file_data_to_string
+from deepagents.backends.utils import create_file_data
 from fastapi import UploadFile
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
@@ -22,10 +22,9 @@ from langgraph.graph.state import CompiledStateGraph
 from juena_core.filesystem.service import ThreadFiles
 from juena_core.log import get_logger
 from juena_core.schema.upload_limits import (
-    CHAT_INPUT_MAX_UPLOAD_MB,
     MAX_ATTACHMENT_BYTES,
-    MAX_ATTACHMENTS_PER_MESSAGE,
-    is_text_readable_filename,
+    UploadPolicy,
+    validate_attachments,
 )
 from juena_core.server.chat.input_constants import (
     INPUTS_PREFIX as _INPUTS_PREFIX,
@@ -90,7 +89,10 @@ def _dedupe_staged_name(filename: str, taken_names: set[str]) -> str:
     return candidate
 
 
-async def _read_upload_bounded(upload: UploadFile, filename: str) -> bytes:
+async def _read_upload_bounded(
+    upload: UploadFile, filename: str, max_bytes: int = MAX_ATTACHMENT_BYTES,
+    remaining_bytes: int | None = None,
+) -> bytes:
     """Read *upload* into memory, refusing anything over the per-file limit.
 
     Starlette reports ``size`` for multipart uploads, so the common oversized
@@ -100,19 +102,23 @@ async def _read_upload_bounded(upload: UploadFile, filename: str) -> bytes:
     """
 
     declared_size = getattr(upload, "size", None)
-    if isinstance(declared_size, int) and declared_size > MAX_ATTACHMENT_BYTES:
+    if isinstance(declared_size, int) and declared_size > max_bytes:
         raise ValueError(
-            f"File '{filename}' exceeds the {CHAT_INPUT_MAX_UPLOAD_MB} MB per-file limit."
+            f"File '{filename}' exceeds the {max_bytes / 1024**2:g} MiB per-file limit."
         )
+    if isinstance(declared_size, int) and remaining_bytes is not None and declared_size > remaining_bytes:
+        raise ValueError("Attachments exceed the combined upload limit.")
 
     chunks: list[bytes] = []
     total = 0
     while chunk := await upload.read(_UPLOAD_CHUNK_BYTES):
         total += len(chunk)
-        if total > MAX_ATTACHMENT_BYTES:
+        if total > max_bytes:
             raise ValueError(
-                f"File '{filename}' exceeds the {CHAT_INPUT_MAX_UPLOAD_MB} MB per-file limit."
+                f"File '{filename}' exceeds the {max_bytes / 1024**2:g} MiB per-file limit."
             )
+        if remaining_bytes is not None and total > remaining_bytes:
+            raise ValueError("Attachments exceed the combined upload limit.")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -139,20 +145,16 @@ async def normalize_uploaded_attachments(
     existing_upload_paths: Sequence[str] | None = None,
     allowed_suffixes: Collection[str] | None = None,
     preserve_bytes: bool = False,
+    upload_policy: UploadPolicy | None = None,
+    thread_files: ThreadFiles | None = None,
 ) -> tuple[list[UploadedAttachment], dict[str, Any]]:
-    """Validate uploads and stage them under ``/inputs/uploads``.
+    """Validate a complete batch before publishing text state or workspace bytes.
 
-    ``allowed_suffixes`` overrides the accepted extensions. It is a parameter
-    because the set is domain-specific: VITESS uploads ``.dat`` and ``.inf``
-    instrument files that mean nothing to a code-chat assistant.
+    ``allowed_suffixes`` retains the legacy application-specific text override.
+    Binary uploads are opt-in and never enter graph file state.
     """
 
     uploads = list(attachments or [])
-    if len(uploads) > MAX_ATTACHMENTS_PER_MESSAGE:
-        raise ValueError(
-            f"At most {MAX_ATTACHMENTS_PER_MESSAGE} files may be uploaded per message."
-        )
-
     files_update: dict[str, Any] = {}
     normalized: list[UploadedAttachment] = []
     taken_names = {
@@ -161,40 +163,58 @@ async def normalize_uploaded_attachments(
         if isinstance(path, str) and path.startswith(_UPLOADS_PREFIX)
     }
 
-    for index, upload in enumerate(uploads, start=1):
-        original_name = upload.filename or f"upload_{index}.txt"
-        sanitized_name = sanitize_uploaded_filename(original_name)
-
-        readable = (
-            is_text_readable_filename(sanitized_name)
-            if allowed_suffixes is None
-            else is_text_readable_filename(sanitized_name, allowed_suffixes=allowed_suffixes)
+    try:
+        if upload_policy is not None and allowed_suffixes is not None:
+            raise ValueError("Specify upload_policy or allowed_suffixes, not both")
+        policy = upload_policy or UploadPolicy(
+            **({"text_suffixes": frozenset(allowed_suffixes)} if allowed_suffixes is not None else {})
         )
-        if not readable:
-            raise ValueError(
-                f"File '{original_name}' has an unsupported extension. "
-                "Only text-readable code, config, docs, notebook, and log files are allowed."
-            )
-
-        staged_name = _dedupe_staged_name(sanitized_name, taken_names)
-        raw = await _read_upload_bounded(upload, original_name)
-        text = _decode_upload_text(raw, original_name)
-        if preserve_bytes:
-            # Validation above accepts UTF-8 with a BOM. Keep its exact bytes in
-            # the shared workspace, including line endings and the optional BOM.
-            text = raw.decode("utf-8")
-        staged_path = f"{_UPLOADS_PREFIX}{staged_name}"
-        files_update[staged_path] = create_file_data(text)
-        normalized.append(
-            UploadedAttachment(
-                original_filename=original_name,
-                staged_path=staged_path,
-                char_count=len(text),
-            )
+        errors = validate_attachments(
+            [(u.filename or "upload.txt", getattr(u, "size", None)) for u in uploads],
+            upload_policy=policy,
         )
-        await upload.close()
-
-    return normalized, files_update
+        if errors:
+            raise ValueError(" ".join(errors))
+        payloads: list[tuple[str, bytes]] = []
+        total = 0
+        for index, upload in enumerate(uploads, start=1):
+            original_name = upload.filename or f"upload_{index}.txt"
+            sanitized_name = sanitize_uploaded_filename(original_name)
+            staged_name = _dedupe_staged_name(sanitized_name, taken_names)
+            binary = Path(sanitized_name).suffix.lower() in policy.binary_suffixes
+            if binary and thread_files is None:
+                raise ValueError("Binary uploads require a conversation filesystem")
+            raw = await _read_upload_bounded(
+                upload, original_name, policy.file_limit(sanitized_name), policy.max_total_bytes - total,
+            )
+            total += len(raw)
+            text = None
+            if binary:
+                classic = raw.startswith((b"II\x2a\x00", b"MM\x00\x2a")) and len(raw) >= 8
+                big = raw.startswith((b"II\x2b\x00\x08\x00\x00\x00", b"MM\x00\x2b\x00\x08\x00\x00")) and len(raw) >= 16
+                if not (classic or big):
+                    raise ValueError(f"File '{original_name}' has an invalid TIFF header.")
+            else:
+                text = _decode_upload_text(raw, original_name)
+                if preserve_bytes:
+                    text = raw.decode("utf-8")
+            staged_path = f"{_UPLOADS_PREFIX}{staged_name}"
+            if thread_files is None:
+                files_update[staged_path] = create_file_data(text)
+            payloads.append((staged_name, raw))
+            normalized.append(UploadedAttachment(
+                original_filename=original_name, staged_path=staged_path,
+                char_count=len(text) if text is not None else None,
+                size_bytes=len(raw), media_type="image/tiff" if binary else "text/plain",
+            ))
+        if thread_files is not None and payloads:
+            async with thread_files.aguard():
+                paths = thread_files.add_uploads(payloads)
+            normalized = [replace(upload, staged_path=path) for upload, path in zip(normalized, paths)]
+        return normalized, files_update
+    finally:
+        for upload in uploads:
+            await upload.close()
 
 
 async def get_existing_input_files(
@@ -227,6 +247,7 @@ async def prepare_code_chat_turn_inputs(
     closing_note: str,
     allowed_suffixes: Collection[str] | None = None,
     thread_files: ThreadFiles | None = None,
+    upload_policy: UploadPolicy | None = None,
 ) -> PreparedCodeChatInputs | None:
     """Prepare staged ``/inputs`` files and a manifest for one chat turn."""
 
@@ -238,22 +259,20 @@ async def prepare_code_chat_turn_inputs(
         path: None for path in existing_files if not _is_persistent_input_path(path)
     }
 
+    if thread_files is not None:
+        async with thread_files.aguard():
+            thread_files.migrate(existing_files)
     uploaded, uploaded_updates = await normalize_uploaded_attachments(
         attachments,
         existing_upload_paths=existing_upload_paths,
         allowed_suffixes=allowed_suffixes,
         preserve_bytes=thread_files is not None,
+        upload_policy=upload_policy,
+        thread_files=thread_files,
     )
     files_update.update(uploaded_updates)
     if thread_files is not None:
         async with thread_files.aguard():
-            thread_files.migrate(existing_files)
-            canonical = []
-            for upload in uploaded:
-                text = file_data_to_string(uploaded_updates[upload.staged_path])
-                path = thread_files.add_upload(Path(upload.staged_path).name, text.encode("utf-8"))
-                canonical.append(replace(upload, staged_path=path))
-            uploaded = canonical
             upload_dir = thread_files.path("/workspace/uploads")
             existing_upload_paths = sorted(
                 f"/workspace/uploads/{p.name}" for p in upload_dir.iterdir()

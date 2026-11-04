@@ -119,6 +119,17 @@ The optional file browser lets users browse, preview, and edit the same files
 available to their agent. It supports conversation-specific workspaces and works
 without enabling code execution.
 
+Uploads default to UTF-8 text, including `.dat`, with five files and 1 MiB per
+file. Applications can pass an optional `UploadPolicy` from
+`juena_core.schema.upload_limits` to `create_app()` and the UI's
+`validate_attachments()`. It specifies text/binary extensions, per-type sizes,
+and the combined message limit. The legacy `allowed_suffixes` text override
+remains supported; do not pass both options. Binary uploads currently support
+TIFF and require the conversation filesystem. The server validates sizes and
+TIFF signatures, stores original bytes outside graph state, and publishes a
+batch only after every file passes validation. Image decoding belongs in the
+application's isolated processing tools.
+
 ## Application wiring
 
 The base application runtime never reads environment variables or a `.env`

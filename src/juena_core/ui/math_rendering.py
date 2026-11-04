@@ -328,6 +328,29 @@ def repair_adjacent_math_fragments(content: str) -> str:
     return "".join(repaired_lines)
 
 
+def _repair_outside_display_math(segment: str) -> str:
+    """Run the delimiter repairs on the text around ``$$`` blocks, not inside them.
+
+    A ``$$`` block is already a complete formula. The repairs work line by
+    line, so on their own they would wrap a block line such as
+    ``\\sigma^2 = \\frac{1}{N}`` in ``$...$``. That puts a second delimiter
+    inside the block, KaTeX cannot parse it, and the whole formula is shown as
+    red LaTeX source instead of being rendered.
+    """
+
+    rebuilt: list[str] = []
+    cursor = 0
+    for match in BLOCK_DOLLAR_MATH_RE.finditer(segment):
+        rebuilt.append(
+            repair_adjacent_math_fragments(repair_latex_delimiters(segment[cursor:match.start()]))
+        )
+        rebuilt.append(match.group(0))
+        cursor = match.end()
+
+    rebuilt.append(repair_adjacent_math_fragments(repair_latex_delimiters(segment[cursor:])))
+    return "".join(rebuilt)
+
+
 def normalize_math_markdown(content: str) -> str:
     """Normalize supported math aliases while preserving markdown code segments."""
 
@@ -335,9 +358,7 @@ def normalize_math_markdown(content: str) -> str:
         (
             segment
             if is_code
-            else repair_adjacent_math_fragments(
-                repair_latex_delimiters(normalize_math_aliases(segment))
-            )
+            else _repair_outside_display_math(normalize_math_aliases(segment))
         )
         for segment, is_code in split_markdown_code_segments(content)
     ]

@@ -107,6 +107,45 @@ def test_normalize_math_markdown_wraps_trailing_equation_fragment_after_math_blo
     )
 
 
+def test_normalize_math_markdown_keeps_dollars_out_of_bracket_display_block() -> None:
+    # The answer that rendered as red LaTeX source: a correct \[ ... \] block
+    # whose second line starts with \sigma used to come back wrapped in $...$.
+    content = (
+        "The inverse-variance weighted (IVW) mean\n"
+        "\\[\n"
+        r"I_{\text{c}}(q)=\frac{\sum_k I_k(q)/\sigma_k^2(q)}{\sum_k 1/\sigma_k^2(q)},\qquad" "\n"
+        r"\sigma_{\text{c}}^2(q)=\frac{1}{\sum_k 1/\sigma_k^2(q)} ." "\n"
+        "\\]\n"
+        "If the two runs have identical counting statistics"
+    )
+    assert math_rendering.normalize_math_markdown(content) == (
+        "The inverse-variance weighted (IVW) mean\n"
+        "$$\n"
+        r"I_{\text{c}}(q)=\frac{\sum_k I_k(q)/\sigma_k^2(q)}{\sum_k 1/\sigma_k^2(q)},\qquad" "\n"
+        r"\sigma_{\text{c}}^2(q)=\frac{1}{\sum_k 1/\sigma_k^2(q)} ." "\n"
+        "$$\n"
+        "If the two runs have identical counting statistics"
+    )
+
+
+def test_normalize_math_markdown_leaves_dollar_display_block_unchanged() -> None:
+    content = (
+        "the error bar improves by $\\sqrt{2}$:\n"
+        "$$\n"
+        r"\sigma_{\text{c}} \approx \frac{\sigma}{\sqrt{2}} ." "\n"
+        "$$\n"
+        "The code below implements the general IVW formula."
+    )
+    assert math_rendering.normalize_math_markdown(content) == content
+
+
+def test_normalize_math_markdown_still_repairs_bare_equation_after_display_block() -> None:
+    content = "$$\n\\sigma^2 = \\frac{1}{N}\n$$\n\\frac{a}{b}"
+    assert math_rendering.normalize_math_markdown(content) == (
+        "$$\n\\sigma^2 = \\frac{1}{N}\n$$\n$\\frac{a}{b}$"
+    )
+
+
 def test_normalize_math_markdown_wraps_trailing_bare_expression_after_math_block() -> None:
     content = (
         r"3. $\frac{d\sigma}{d\Omega}= "
