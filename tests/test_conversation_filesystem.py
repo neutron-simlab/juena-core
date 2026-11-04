@@ -3,6 +3,7 @@
 import hashlib
 import io
 import os
+import struct
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -39,6 +40,37 @@ def runtime_backend(monkeypatch, *, writable=True, root="/workspace", directorie
     runtime = SimpleNamespace(context={"user_id": "alice", "thread_id": "conversation"}, state={"files": {}})
     monkeypatch.setattr("juena_core.filesystem.backend.get_runtime", lambda: runtime)
     return ConversationBackend(writable=writable, root=root, directories_only=directories_only)
+
+
+@pytest.mark.parametrize("name", ["image.tif", "image.TIFF", "renamed.dat"])
+def test_text_tools_refuse_utf8_decodable_tiff(files, monkeypatch, name):
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+    from PIL import Image
+
+    # A complete 2x2 grayscale TIFF whose headers and pixels are all valid UTF-8.
+    entries = [(256, 3, 1, 2), (257, 3, 1, 2), (258, 3, 1, 8), (259, 3, 1, 1),
+               (262, 3, 1, 1), (273, 4, 1, 110), (278, 4, 1, 2), (279, 4, 1, 4)]
+    raw = (b"II" + struct.pack("<HIH", 42, 8, len(entries))
+           + b"".join(struct.pack("<HHII", *entry) for entry in entries)
+           + struct.pack("<I", 0) + bytes([0, 1, 2, 3]))
+    assert raw.decode("utf-8").encode("utf-8") == raw
+    with Image.open(io.BytesIO(raw)) as image:
+        assert image.size == (2, 2) and image.tobytes() == bytes([0, 1, 2, 3])
+    path = files.add_upload(name, raw)
+    files.add_upload("text.DAT", "II detector μ\n".encode())
+    backend = runtime_backend(monkeypatch)
+    local = f"/uploads/{name}"
+    read = backend.read(local)
+    assert read.error and "Binary" in read.error
+    assert read.file_data is None
+    tool = next(t for t in FilesystemMiddleware(backend=backend).tools if t.name == "read_file")
+    message = tool.func(local, runtime=SimpleNamespace(tool_call_id="binary-read"))
+    assert message.status == "error" and "\x00" not in message.content
+    assert backend.grep("II", "/uploads").matches == [
+        {"path": "/uploads/text.DAT", "line": 1, "text": "II detector μ"},
+    ]
+    assert files.read(path, {}) == raw
+    assert backend.download_files([local])[0].content == raw
 
 
 @pytest.mark.asyncio
