@@ -116,7 +116,19 @@ def client(monkeypatch, user_id, request, tmp_path):
         filesystem = service.ConversationFilesystem(WorkspaceStore(tmp_path / "workspaces"), identity_secret="postgres-tests-identity-secret-32-characters")
         monkeypatch.setattr(service, "_filesystem", filesystem)
         registry_module.register_agent_factory(SIMULATOR, _filesystem_agent_factory, set_as_default=True)
-    app = create_app(principal=local_principal(user_id=user_id), title="test-app", filesystem=filesystem)
+    upload_policy = None
+    if getattr(request, "param", None) == "tiff":
+        from deepagents.middleware.filesystem import FilesystemState
+        from juena_core.schema.upload_limits import UploadPolicy
+        upload_policy = UploadPolicy(binary_suffixes=frozenset({".tif", ".tiff"}), max_binary_bytes=64 * 1024**2, max_total_bytes=96 * 1024**2)
+        async def binary_factory(provider, model):
+            graph = StateGraph(FilesystemState)
+            graph.add_node("noop", _noop)
+            graph.add_edge(START, "noop")
+            graph.add_edge("noop", END)
+            return object(), graph.compile(checkpointer=get_checkpointer())
+        registry_module.register_agent_factory(SIMULATOR, binary_factory, set_as_default=True)
+    app = create_app(principal=local_principal(user_id=user_id), title="test-app", filesystem=filesystem, upload_policy=upload_policy)
     with TestClient(app) as running:
         yield running
 
@@ -202,6 +214,35 @@ def test_shared_files_through_real_stream_checkpoint_and_deletion(client, user_i
     assert client.get(base).status_code == 404
     with pytest.raises(WorkspaceOwnershipError):
         files.ensure()
+
+
+@pytest.mark.parametrize("client", ["tiff"], indirect=True)
+def test_tiff_and_dat_survive_stream_history_reopen_and_deletion(client, user_id):
+    from juena_core.filesystem import get_filesystem
+
+    thread_id = _create_chat(client, SIMULATOR)
+    base = f"/threads/{thread_id}"
+    data = b"II\x2a\x00\x08\x00\x00\x00\xff\x00"
+    response = client.post(f"/{SIMULATOR}/stream_with_files", data={"thread_id": thread_id, "message": "Inspect"}, files=[
+        ("attachments", ("detector.TIFF", data, "application/octet-stream")),
+        ("attachments", ("curve.dat", b"0 1\n", "text/plain")),
+    ])
+    assert response.status_code == 200 and '"type": "error"' not in response.text, response.text
+    history = client.get(f"/chats/{thread_id}").json()["messages"]
+    attached = next(m["custom_data"]["attachments"] for m in history if m.get("custom_data", {}).get("attachments"))
+    assert attached[0] == {"name": "detector.TIFF", "size_bytes": len(data), "media_type": "image/tiff"}
+    assert attached[1]["chars"] == 4
+    assert client.get(base + "/filesystem/download", params={"path": "/workspace/uploads/detector.TIFF"}).content == data
+    # Follow-up turns carry paths, not binary file data. Reopening history keeps the attachment metadata.
+    follow = client.post(f"/{SIMULATOR}/stream", json={"thread_id": thread_id, "message": "Use it again"})
+    assert follow.status_code == 200 and '"type": "error"' not in follow.text, follow.text
+    assert client.get(f"/chats/{thread_id}").json()["messages"][0]["custom_data"]["attachments"] == attached
+    other = get_filesystem().for_thread("another-user", thread_id)
+    other.ensure()
+    with pytest.raises(FileNotFoundError):
+        other.read("/workspace/uploads/detector.TIFF", {})
+    assert client.delete(base).status_code == 200
+    assert client.get(base + "/filesystem/download", params={"path": "/workspace/uploads/detector.TIFF"}).status_code == 404
 
 
 @pytest.mark.parametrize("client", [True], indirect=True)

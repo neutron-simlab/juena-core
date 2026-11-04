@@ -128,13 +128,26 @@ class ThreadFiles:
         return aliases
 
     def add_upload(self, name: str, content: bytes) -> str:
-        candidate = f"/workspace/uploads/{name}"
-        index = 2
-        while self.path(candidate).exists():
-            candidate = f"/workspace/uploads/{Path(name).stem}_{index}{Path(name).suffix}"
-            index += 1
-        self.store.put(self.workspace_id, candidate, content, create=True)
-        return candidate
+        return self.add_uploads([(name, content)])[0]
+
+    def add_uploads(self, uploads: list[tuple[str, bytes]]) -> list[str]:
+        """Publish a validated batch under the files guard, rolling back failed writes."""
+        created: list[str] = []
+        try:
+            for name, content in uploads:
+                candidate = f"/workspace/uploads/{name}"
+                index = 2
+                while self.path(candidate).exists():
+                    candidate = f"/workspace/uploads/{Path(name).stem}_{index}{Path(name).suffix}"
+                    index += 1
+                created.append(candidate)
+                self.store.put(self.workspace_id, candidate, content, create=True)
+        except BaseException:
+            for path in created:
+                self.path(path).unlink(missing_ok=True)
+            self.store.invalidate_usage(self.workspace_id)
+            raise
+        return created
 
     def read(self, path: str, state_files: dict[str, Any], *, limit: int | None = None) -> bytes:
         self.store.check_owner(self.workspace_id, self.tenant_id)

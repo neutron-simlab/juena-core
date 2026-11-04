@@ -265,6 +265,22 @@ def test_api_reads_saves_conflicts_and_downloads(api, files):
     assert api.get(url + "/file", params={"path": "/etc/passwd"}).status_code == 403
 
 
+def test_binary_original_is_downloadable_private_and_deleted_with_conversation(api, files, filesystem):
+    data = b"II\x2a\x00\x08\x00\x00\x00\xff\x00"
+    path = files.add_upload("detector.tif", data)
+    base = "/threads/conversation/filesystem"
+    preview = api.get(base + "/file", params={"path": path}).json()
+    assert preview["is_text"] is False and preview["editable"] is False
+    assert api.get(base + "/download", params={"path": path}).content == data
+    assert api.get("/threads/other/filesystem/download", params={"path": path}).status_code == 404
+    other = filesystem.for_thread("bob", "conversation")
+    other.ensure()
+    with pytest.raises(FileNotFoundError):
+        other.read(path, {})
+    files.store.delete(files.workspace_id, files.tenant_id)
+    assert not files.path(path).exists()
+
+
 def test_api_refuses_saves_during_execution_and_pending_approval(api, files, monkeypatch):
     path = files.add_upload("script.py", b"a = 1")
     payload = {"path": path, "text": "changed", "revision": files.preview(path, {})["revision"]}

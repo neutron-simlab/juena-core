@@ -353,8 +353,11 @@ def render_attachment_chips(custom_data: dict[str, Any] | None) -> None:
         if not name:
             continue
         chars = attachment.get("chars")
+        size = attachment.get("size_bytes")
         labels.append(
-            f"📎 `{name}` ({chars} chars)" if isinstance(chars, int) else f"📎 `{name}`"
+            f"📎 `{name}` ({chars} chars)" if isinstance(chars, int)
+            else f"📎 `{name}` ({size / 1024**2:.2f} MiB)" if isinstance(size, int)
+            else f"📎 `{name}`"
         )
 
     if labels:

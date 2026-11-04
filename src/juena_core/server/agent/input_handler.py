@@ -122,7 +122,7 @@ class AgentInputHandler:
             display_kwargs[DISPLAY_TEXT_KEY] = user_input
         if display_attachments:
             display_kwargs[DISPLAY_ATTACHMENTS_KEY] = [
-                {"name": attachment.original_filename, "chars": attachment.char_count}
+                attachment.display_metadata()
                 for attachment in display_attachments
             ]
 

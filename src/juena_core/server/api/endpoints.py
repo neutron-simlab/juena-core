@@ -57,6 +57,7 @@ from juena_core.log import get_logger
 from juena_core.schema.interrupts import ClarificationResumeInput
 from juena_core.schema.llm_models import Provider
 from juena_core.schema.server import StreamInput
+from juena_core.schema.upload_limits import UploadPolicy
 from juena_core.server.agent.input_handler import AgentInputHandler
 from juena_core.server.agent.registry import get_agent, get_default_agent
 from juena_core.server.chat.inputs import prepare_code_chat_turn_inputs
@@ -219,6 +220,7 @@ def build_api_router(
     stream_policy: StreamPolicy | None = None,
     closing_note: str = DEFAULT_CLOSING_NOTE,
     allowed_suffixes: Collection[str] | None = None,
+    upload_policy: UploadPolicy | None = None,
 ) -> APIRouter:
     """Build the agent-invocation router against one application's seams.
 
@@ -239,9 +241,14 @@ def build_api_router(
         stream_policy: Custom event types and silent tools this application's
             execution machinery contributes.
         closing_note: Last paragraph of a staged-input manifest.
-        allowed_suffixes: Upload extensions this application accepts.
+        allowed_suffixes: Legacy text upload extensions this application accepts.
+        upload_policy: Optional text/binary upload policy; mutually exclusive with allowed_suffixes.
     """
 
+    if upload_policy is not None and allowed_suffixes is not None:
+        raise ValueError("Specify upload_policy or allowed_suffixes, not both")
+    if upload_policy and upload_policy.binary_suffixes and filesystem is None:
+        raise ValueError("Binary uploads require a conversation filesystem")
     router = APIRouter()
     workspace = workspace or ThreadWorkspace()
     thread_activity = thread_activity or ThreadActivity()
@@ -395,6 +402,7 @@ def build_api_router(
             attachments=attachments,
             closing_note=closing_note,
             allowed_suffixes=allowed_suffixes,
+            upload_policy=upload_policy,
             thread_files=filesystem.for_thread(user_id, run.thread_id) if filesystem else None,
         )
         if workspace.stage is not None:
@@ -598,7 +606,7 @@ def build_api_router(
         user: Principal = Depends(principal),
         session: AsyncSession = Depends(get_db_session),
     ) -> EventSourceResponse:
-        """Stream an agent response from multipart form data and text attachments."""
+        """Stream an agent response from multipart form data and validated attachments."""
 
         user_input = StreamInput(message=message, thread_id=_form_field(thread_id))
         if (provider_value := _form_field(provider)) is not None:
