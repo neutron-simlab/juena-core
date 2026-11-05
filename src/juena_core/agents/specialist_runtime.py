@@ -35,7 +35,7 @@ from juena_core.agents.backends import (
     ReadOnlyFilesystemBackend,
     ReadOnlyInputsStateBackend,
 )
-from juena_core.agents.delegation import with_delegation_boundary
+from juena_core.agents.delegation import AttachUserMessageMiddleware, with_delegation_boundary
 from juena_core.agents.loop_guard import RepeatedToolCallMiddleware
 from juena_core.agents.specialist_outcome import (
     ReportWhenToolsRunOutMiddleware,
@@ -444,6 +444,7 @@ def build_supervisor_middleware(
             system_prompt=None,
             task_description=task_description,
         ),
+        AttachUserMessageMiddleware(),
         create_summarization_middleware(summarizer_model, backend),
         PatchToolCallsMiddleware(),
         *extra,

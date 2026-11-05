@@ -12,20 +12,10 @@ from juena_core.schema.llm_models import (
 def test_blablador_models_include_the_curated_entries() -> None:
     models = get_models_for_provider(Provider.BLABLADOR)
 
-    assert BlabladorModelName.QWEN38_FLASH_NEXT.value in models
     assert BlabladorModelName.QWEN38_FLASH_NEXT_JUWELS.value in models
-    assert BlabladorModelName.MIMO_V26_PRO.value in models
     assert BlabladorModelName.GPT_OSS.value in models
-    assert BlabladorModelName.QWEN35_122B.value in models
     assert BlabladorModelName.DEEPSEEK_V41_FLASH_JUWELS.value in models
     assert BlabladorModelName.DEEPSEEK_V41_FLASH_HZDR.value in models
-
-
-def test_blablador_display_name_for_qwen35_122b() -> None:
-    assert (
-        get_blablador_model_display_name(BlabladorModelName.QWEN35_122B.value)
-        == "QWEN3.5-122B"
-    )
 
 
 def test_blablador_display_names_hide_provider_ranking_prefixes() -> None:
@@ -36,10 +26,7 @@ def test_blablador_display_names_hide_provider_ranking_prefixes() -> None:
 
     assert labels == [
         "GPT-OSS-120b",
-        "Qwen3.8-Flash-Next",
         "Qwen3.8-Flash-Next (JUWELS, 940k)",
-        "MiMo-V2.6-Pro",
-        "QWEN3.5-122B",
         "DeepSeek-V4.1-Flash (JUWELS)",
         "DeepSeek-V4.1-Flash (HZDR)",
     ]

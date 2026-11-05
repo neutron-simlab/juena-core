@@ -54,12 +54,12 @@ def test_provider_availability_requires_complete_credentials(monkeypatch) -> Non
 
 def test_default_model_comes_from_application_settings(monkeypatch) -> None:
     config = make_settings(
-        BLABLADOR_DEFAULT_MODEL=BlabladorModelName.QWEN38_FLASH_NEXT.value
+        BLABLADOR_DEFAULT_MODEL=BlabladorModelName.DEEPSEEK_V41_FLASH_JUWELS.value
     )
     monkeypatch.setattr(providers, "settings", lambda: config)
 
     assert providers.get_default_model("blablador") == (
-        "02 - Qwen3.8-Flash-Next-NVFP4, general purpose large model"
+        "15 - DeepSeek-V4.1-Flash on JUWELS Booster"
     )
 
 
@@ -173,7 +173,7 @@ def test_unhashable_override_skips_the_model_cache(monkeypatch) -> None:
 
 
 def test_available_model_filter_keeps_only_known_models(monkeypatch) -> None:
-    selected = BlabladorModelName.MIMO_V26_PRO.value
+    selected = BlabladorModelName.DEEPSEEK_V41_FLASH_JUWELS.value
     config = make_settings(BLABLADOR_AVAILABLE_MODELS=f"unknown, {selected}")
     monkeypatch.setattr(providers, "settings", lambda: config)
 

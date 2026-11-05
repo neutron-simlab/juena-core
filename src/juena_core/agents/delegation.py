@@ -23,13 +23,81 @@ decided here, before invocation.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 
 from juena_core.agents.findings import crossing_files, findings_delta
 
-__all__ = ["SpecialistDelegate", "with_delegation_boundary"]
+__all__ = [
+    "USER_MESSAGE_NOTE",
+    "AttachUserMessageMiddleware",
+    "SpecialistDelegate",
+    "with_delegation_boundary",
+    "with_user_message",
+]
+
+#: Tells the specialist what the attachment is for. The objective stays the
+#: assignment: when the supervisor splits one request between two specialists,
+#: each must not take on the whole message.
+USER_MESSAGE_NOTE = (
+    "The user's message this turn, attached automatically by the server. Your "
+    "assignment is the objective above; use this message only for details that "
+    "objective refers to, such as a specification it mentions."
+)
+
+
+def with_user_message(description: str, messages: Sequence[Any]) -> str:
+    """Return the brief with the user's latest message attached.
+
+    Only the latest message: an earlier one may hold a request the user has since
+    replaced, so carrying context from earlier turns stays the supervisor's job.
+    Nothing is added when the brief already contains the message word for word.
+    """
+
+    user = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+    text = user.text.strip() if user is not None else ""
+    if not text or text in description:
+        return description
+    return f"{description}\n\n---\n{USER_MESSAGE_NOTE}\n\n<user_message>\n{text}\n</user_message>"
+
+
+class AttachUserMessageMiddleware(AgentMiddleware):
+    """Attach the user's latest message to every brief the supervisor writes.
+
+    A specialist sees only its brief, never the conversation (see the module
+    docstring). A supervisor model sometimes writes "per the user's spec" and
+    leaves the spec out; the specialist then cannot do the task and has to ask.
+    Asking the supervisor more firmly did not stop that, so the server attaches
+    the message itself.
+
+    It changes only what the `task` tool receives. The supervisor's own message
+    history keeps the brief as the model wrote it.
+    """
+
+    def _attached(self, request: Any) -> Any:
+        call = request.tool_call
+        args = call.get("args") or {}
+        description = args.get("description")
+        if call.get("name") != "task" or not isinstance(description, str):
+            return request
+        brief = with_user_message(description, request.state.get("messages", []))
+        if brief == description:
+            return request
+        return request.override(tool_call={**call, "args": {**args, "description": brief}})
+
+    def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        return handler(self._attached(request))
+
+    async def awrap_tool_call(
+        self,
+        request: Any,
+        handler: Callable[[Any], Awaitable[Any]],
+    ) -> Any:
+        return await handler(self._attached(request))
 
 
 class SpecialistDelegate(Runnable[dict[str, Any], dict[str, Any]]):
