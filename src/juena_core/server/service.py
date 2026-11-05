@@ -98,6 +98,7 @@ def create_app(
     closing_note: str = DEFAULT_CLOSING_NOTE,
     allowed_suffixes: Collection[str] | None = None,
     upload_policy: UploadPolicy | None = None,
+    run_controls: bool = False,
     title: str = "juena-core",
     version: str = "0.1.0",
     extra_routers: Sequence[APIRouter] = (),
@@ -210,6 +211,7 @@ def create_app(
             closing_note=closing_note,
             allowed_suffixes=allowed_suffixes,
             upload_policy=upload_policy,
+            run_controls=run_controls,
         )
     )
     if filesystem is not None:

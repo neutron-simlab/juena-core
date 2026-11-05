@@ -44,12 +44,14 @@ class SandboxWorker:
 
     def _execute(self, job: SandboxJobRecord) -> None:
         try:
-            outcome = self.executor.run(job)
+            # Detached research and legacy jobs have no foreground run to stop.
+            cancelled = (lambda: self.jobs.get(job.id).cancel_requested) if job.run_id else None
+            outcome = self.executor.run(job, cancelled=cancelled)
         except Exception as exc:
             logger.exception("Sandbox job %s failed in the worker", job.id)
-            self.jobs.finish(job.id, status="failed", output=f"Sandbox job failed: {exc}")
             if isinstance(exc, ContainerCleanupError):
                 raise
+            self.jobs.finish(job.id, status="failed", output=f"Sandbox job failed: {exc}")
             return
         self.jobs.finish(
             job.id,

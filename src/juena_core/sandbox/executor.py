@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any
 
 from podman import PodmanClient
@@ -261,25 +262,28 @@ class PodmanExecutor:
                 buffer.extend(chunk)
         return bytes(buffer), truncated
 
-    def run(self, job: SandboxJobRecord) -> ExecutionOutcome:
+    def run(self, job: SandboxJobRecord, *, cancelled: Callable[[], bool] | None = None) -> ExecutionOutcome:
         with (
             self.workspaces.guard(job.workspace_id, operation=True, shared=True, blocking=True),
             self.workspaces.guard(job.workspace_id, execution=True, blocking=True),
         ):
             self.workspaces.invalidate_usage(job.workspace_id)
             try:
-                return self._run_locked(job)
+                return self._run_locked(job, cancelled=cancelled)
             finally:
                 # Commands can create, rename or delete arbitrary workspace files.
                 self.workspaces.invalidate_usage(job.workspace_id)
 
-    def _run_locked(self, job: SandboxJobRecord) -> ExecutionOutcome:
+    def _run_locked(self, job: SandboxJobRecord, *, cancelled: Callable[[], bool] | None = None) -> ExecutionOutcome:
         """Run one claimed job to completion. The container never outlives it."""
 
         self.workspaces.ensure(job.workspace_id, job.tenant_id)
         self.workspaces.enforce_limit(job.workspace_id)
         self.workspaces.ensure_outputs(job.workspace_id)
         started_at = job.started_at or job.created_at
+
+        if cancelled is not None and cancelled():
+            return ExecutionOutcome("cancelled", "Cancelled before execution", None, False, [])
 
         with self._start_lock:
             container = self.client.containers.create(**self._container_kwargs(job))
@@ -289,10 +293,33 @@ class PodmanExecutor:
                 self._remove(container)
                 raise
         try:
-            exit_code, host_timed_out = self._wait_for_exit(
-                container,
-                job.timeout_seconds + HOST_TIMEOUT_GRACE_SECONDS,
-            )
+            was_cancelled = False
+            if cancelled is None:
+                exit_code, host_timed_out = self._wait_for_exit(container, job.timeout_seconds + HOST_TIMEOUT_GRACE_SECONDS)
+            else:
+                deadline = monotonic() + job.timeout_seconds + HOST_TIMEOUT_GRACE_SECONDS
+                exit_code, host_timed_out = None, False
+                while True:
+                    # Only foreground jobs need cancellation polling. One
+                    # check per second bounds both DB and Podman traffic.
+                    if cancelled():
+                        was_cancelled = True
+                        with suppress(*PODMAN_ERRORS):
+                            container.stop(timeout=0)
+                        break
+                    # A brief Podman connection failure does not mean the
+                    # command failed. Retry until its existing host deadline.
+                    with suppress(*PODMAN_ERRORS):
+                        container.reload()
+                        state = container.attrs.get("State", {})
+                        if not state.get("Running", False):
+                            exit_code = state.get("ExitCode")
+                            break
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        host_timed_out = True
+                        break
+                    sleep(min(1.0, remaining))
             if host_timed_out:
                 with suppress(*PODMAN_ERRORS):
                     container.stop(timeout=0)
@@ -301,6 +328,8 @@ class PodmanExecutor:
             self._remove(container)
 
         self.workspaces.enforce_limit(job.workspace_id)
+        if was_cancelled:
+            return ExecutionOutcome("cancelled", "Cancelled by the user", exit_code, truncated, [])
         timed_out = host_timed_out or exit_code in TIMEOUT_EXIT_CODES
         scan = self.workspaces.artifacts_since(job.workspace_id, started_at)
         model_output = output.decode("utf-8", errors="replace")

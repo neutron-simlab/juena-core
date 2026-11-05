@@ -48,6 +48,7 @@ class AgentInputHandler:
         run_id: UUID | None = None,
         provider: str | None = None,
         model: str | None = None,
+        control: Any = None,
     ) -> AgentRunContext:
         """Build the config and runtime context for one agent run.
 
@@ -88,6 +89,7 @@ class AgentInputHandler:
                 # The same id as `config`'s, carried where a subgraph can see
                 # it. See RuntimeModelContext for why both are needed.
                 run_id=str(run_id),
+                control=control,
             ),
             run_id=run_id,
             thread_id=thread_id,

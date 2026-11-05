@@ -44,6 +44,8 @@ class RuntimeModelContext:
     thread_id: str | None = None
     user_id: str | None = None
     run_id: str | None = None
+    # Execution-only handle. Runtime context is never checkpointed.
+    control: Any = None
 
 
 def _provider_model_from_context(context: Any) -> tuple[str | None, str | None]:

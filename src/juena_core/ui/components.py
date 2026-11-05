@@ -416,6 +416,12 @@ def render_message(message: ChatMessage, show_system: bool = False) -> None:
             else:
                 st.write(message.content)
             render_attachment_chips(message.custom_data)
+            if steering := message.custom_data.get("steering"):
+                state = steering.get("status", "received")
+                st.caption({"received": "Received", "applied": "Applied", "not_applied": "Not applied"}.get(state, state))
+                if state == "not_applied" and st.button("Use as next message", key=f"retry-steering:{message.id}"):
+                    st.session_state.chat_prompt = message.content
+                    st.rerun()
 
     elif message.type == "ai":
         with st.chat_message("assistant"):
@@ -423,6 +429,8 @@ def render_message(message: ChatMessage, show_system: bool = False) -> None:
             if message.content:
                 render_content(sanitize_assistant_content(message.content))
             render_artifacts(message.custom_data)
+            if message.custom_data.get("run_status") == "cancelled" and message.content != "Response stopped.":
+                st.caption("Stopped · partial response")
 
     elif message.type == "tool":
         with st.chat_message("assistant"):

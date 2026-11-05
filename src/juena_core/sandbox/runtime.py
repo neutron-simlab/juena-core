@@ -34,6 +34,7 @@ from juena_core.sandbox.backend import PodmanSandboxBackend, ReadOnlySandboxInpu
 from juena_core.sandbox.config import sandbox_enabled, sandbox_settings
 from juena_core.sandbox.jobs import SandboxJobs, tenant_id_for, workspace_id_for
 from juena_core.sandbox.workspace import WorkspaceStore
+from juena_core.server.run_control import control_from
 
 __all__ = [
     "RuntimePodmanSandboxBackend",
@@ -166,6 +167,7 @@ class RuntimePodmanSandboxBackend(BaseSandbox):
     def _resolve() -> PodmanSandboxBackend:
         runtime = get_runtime()
         identity = _SandboxIdentity.from_runtime(runtime)
+        control = control_from(runtime.context)
         return PodmanSandboxBackend(
             jobs=get_sandbox_jobs(),
             workspaces=get_workspace_store(),
@@ -173,7 +175,9 @@ class RuntimePodmanSandboxBackend(BaseSandbox):
             workspace_id=identity.workspace_id,
             user_id=identity.user_id,
             thread_id=identity.thread_id,
-            run_id=identity.run_id,
+            # Delegated graphs have their own config; Stop owns the root run.
+            run_id=control.id if control is not None else identity.run_id,
+            control=control,
         )
 
     @property

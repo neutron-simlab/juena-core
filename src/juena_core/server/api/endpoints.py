@@ -32,7 +32,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Seq
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import (
     APIRouter,
@@ -45,7 +45,7 @@ from fastapi import (
     status,
 )
 from langgraph.graph.state import CompiledStateGraph
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -81,6 +81,7 @@ from juena_core.server.interrupts import (
 from juena_core.server.streaming import events
 from juena_core.server.streaming.own_task import AgentStreamResponse
 from juena_core.server.streaming.processor import StreamEventProcessor, StreamPolicy
+from juena_core.server.run_control import RunRegistry
 
 logger = get_logger(__name__)
 
@@ -125,9 +126,9 @@ class ThreadActivity:
         self._active: dict[str, int] = {}
         self._deleting: set[str] = set()
 
-    def reserve_run(self, thread_id: str) -> bool:
+    def reserve_run(self, thread_id: str, *, exclusive: bool = False) -> bool:
         with self._lock:
-            if thread_id in self._deleting:
+            if thread_id in self._deleting or (exclusive and self._active.get(thread_id, 0)):
                 return False
             self._active[thread_id] = self._active.get(thread_id, 0) + 1
             return True
@@ -208,6 +209,11 @@ class PreparedAgentInvocation:
     effective_user_message: str
 
 
+class SteeringInput(BaseModel):
+    instruction_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    text: str = Field(min_length=1, max_length=32000)
+
+
 def build_api_router(
     principal: PrincipalDependency,
     *,
@@ -221,6 +227,7 @@ def build_api_router(
     closing_note: str = DEFAULT_CLOSING_NOTE,
     allowed_suffixes: Collection[str] | None = None,
     upload_policy: UploadPolicy | None = None,
+    run_controls: bool = False,
 ) -> APIRouter:
     """Build the agent-invocation router against one application's seams.
 
@@ -253,6 +260,56 @@ def build_api_router(
     workspace = workspace or ThreadWorkspace()
     thread_activity = thread_activity or ThreadActivity()
     policy = stream_policy or StreamPolicy()
+    runs = RunRegistry()
+    controls_router = APIRouter()
+
+    async def _owned_run(thread_id, run_id, user, session):
+        try:
+            await get_owned_chat(session, user.id, thread_id, agent_id=None)
+        except ChatNotFoundError as exc:
+            raise HTTPException(404, "Chat not found") from exc
+        control = runs.get(run_id, thread_id, str(user.id))
+        if control is None:
+            raise HTTPException(404, "Run not found")
+        return control
+
+    @controls_router.get("/threads/{thread_id}/runs/{run_id}")
+    async def run_status(thread_id: str, run_id: str, user: Principal = Depends(principal), session: AsyncSession = Depends(get_db_session)):
+        return (await _owned_run(thread_id, run_id, user, session)).snapshot()
+
+    @controls_router.post("/threads/{thread_id}/runs/{run_id}/steer", status_code=202)
+    async def steer_run(thread_id: str, run_id: str, payload: SteeringInput, user: Principal = Depends(principal), session: AsyncSession = Depends(get_db_session)):
+        control = await _owned_run(thread_id, run_id, user, session)
+        if not payload.text.strip():
+            raise HTTPException(422, "Instruction text cannot be blank")
+        try:
+            return control.steer(payload.instruction_id, payload.text)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @controls_router.post("/threads/{thread_id}/runs/{run_id}/stop", status_code=202)
+    async def stop_run(thread_id: str, run_id: str, user: Principal = Depends(principal), session: AsyncSession = Depends(get_db_session)):
+        control = await _owned_run(thread_id, run_id, user, session)
+        control.stop()
+        return control.snapshot()
+
+    if run_controls:
+        router.include_router(controls_router)
+
+    def _response(source_factory, thread_id, user_id, lease):
+        if not run_controls:
+            return AgentStreamResponse(source_factory(None), on_close=partial(_release_run, thread_id, lease))
+        control = runs.create(thread_id=thread_id, user_id=user_id)
+        control.state = "preparing"
+
+        def release():
+            if not control.cleanup_failed:
+                _release_run(thread_id, lease)
+
+        return AgentStreamResponse(
+            source_factory(control), control=control, on_close=release,
+            cleanup_seconds=25,
+        )
 
     async def _stream_agent_payloads(
         *,
@@ -356,8 +413,8 @@ def build_api_router(
         """Hold the activity guard across ownership validation and the run."""
 
         candidate = thread_id or str(uuid4())
-        if not thread_activity.reserve_run(candidate):
-            raise HTTPException(status_code=409, detail="Thread deletion is in progress")
+        if not thread_activity.reserve_run(candidate, exclusive=run_controls):
+            raise HTTPException(status_code=409, detail="This conversation is already running or being deleted")
         try:
             lease = await _file_lease(str(user.id), candidate)
             try:
@@ -379,6 +436,7 @@ def build_api_router(
         provider: str | None,
         model: str | None,
         attachments: Sequence[UploadFile] | None = None,
+        control: Any = None,
     ) -> PreparedAgentInvocation:
         """Prepare LangGraph invocation kwargs for JSON and multipart requests."""
 
@@ -390,7 +448,14 @@ def build_api_router(
             user_id=user_id,
             provider=provider,
             model=model,
+            run_id=UUID(control.id) if control is not None else None,
+            control=control,
         )
+        if control is not None:
+            control.agent, control.config = agent, run.config
+            control.check()
+            control.state = "running"
+            control.emit()
 
         if await first_pending_interrupt(agent, run.config) is not None:
             raise ValueError("Answer the pending question or approval before sending a new message")
@@ -439,6 +504,7 @@ def build_api_router(
         authenticated_user_id: str,
         agent_id: str,
         attachments: Sequence[UploadFile] | None = None,
+        control: Any = None,
     ) -> AsyncGenerator[str, None]:
         """Generate a stream of SSE payloads from the agent."""
 
@@ -461,6 +527,7 @@ def build_api_router(
                 provider=provider,
                 model=model,
                 attachments=attachments,
+                control=control,
             )
             kwargs = prepared.kwargs
             run_id = prepared.run_id
@@ -480,7 +547,8 @@ def build_api_router(
         # Emit thread_id first so clients can use it for follow-up messages.
         thread_id_used = kwargs.get("config", {}).get("configurable", {}).get("thread_id")
         if thread_id_used:
-            yield _sse(events.thread_event(thread_id_used))
+            if control is None:
+                yield _sse(events.thread_event(thread_id_used))
             # A cancelled or crashed previous turn never reached the drain in
             # the artifact middleware. Clear it here rather than inside the
             # graph: an approval interrupt makes "graph invocation" a poor proxy
@@ -517,6 +585,7 @@ def build_api_router(
         payload: Any,
         authenticated_user_id: str,
         agent_id: str,
+        control: Any = None,
     ) -> AsyncGenerator[str, None]:
         """Resume one verified LangGraph interrupt and stream the remaining turn."""
 
@@ -527,7 +596,14 @@ def build_api_router(
                 user_id=authenticated_user_id,
                 provider=payload.provider,
                 model=payload.model,
+                run_id=UUID(control.id) if control is not None else None,
+                control=control,
             )
+            if control is not None:
+                control.agent, control.config = agent, run.config
+                control.check()
+                control.state = "running"
+                control.emit()
             command = await build_resume_command(
                 agent=agent,
                 config=run.config,
@@ -535,7 +611,8 @@ def build_api_router(
                 payload=payload,
             )
             kwargs = {"input": command, "config": run.config, "context": run.context}
-            yield _sse(events.thread_event(payload.thread_id))
+            if control is None:
+                yield _sse(events.thread_event(payload.thread_id))
             async for item in _stream_agent_payloads(
                 agent=agent,
                 kwargs=kwargs,
@@ -581,9 +658,9 @@ def build_api_router(
         )
         # The response owns the run: however it ends, the agent is stopped
         # and cleaned up before the thread is released.
-        return AgentStreamResponse(
-            message_generator(user_input, str(user.id), resolved),
-            on_close=partial(_release_run, user_input.thread_id, lease),
+        return _response(
+            lambda control: message_generator(user_input, str(user.id), resolved, control=control),
+            user_input.thread_id, str(user.id), lease,
         )
 
     @router.post(
@@ -624,14 +701,15 @@ def build_api_router(
         user_input.thread_id, lease = await _reserve_authorized_thread(
             session, user, user_input.thread_id, resolved
         )
-        return AgentStreamResponse(
-            message_generator(
+        return _response(
+            lambda control: message_generator(
                 user_input,
                 str(user.id),
                 resolved,
                 attachments=attachments,
+                control=control,
             ),
-            on_close=partial(_release_run, user_input.thread_id, lease),
+            user_input.thread_id, str(user.id), lease,
         )
 
     @router.post(
@@ -651,8 +729,8 @@ def build_api_router(
         if invocation_guard is not None:
             await invocation_guard(user, getattr(payload, "provider", None))
         resolved = _resolve_agent_id(agent_id)
-        if not thread_activity.reserve_run(payload.thread_id):
-            raise HTTPException(status_code=409, detail="Thread deletion is in progress")
+        if not thread_activity.reserve_run(payload.thread_id, exclusive=run_controls):
+            raise HTTPException(status_code=409, detail="This conversation is already running or being deleted")
         lease = None
         try:
             lease = await _file_lease(str(user.id), payload.thread_id)
@@ -663,9 +741,9 @@ def build_api_router(
         except BaseException:
             _release_run(payload.thread_id, lease)
             raise
-        return AgentStreamResponse(
-            resume_generator(payload, str(user.id), resolved),
-            on_close=partial(_release_run, payload.thread_id, lease),
+        return _response(
+            lambda control: resume_generator(payload, str(user.id), resolved, control=control),
+            payload.thread_id, str(user.id), lease,
         )
 
     @router.get("/threads/{thread_id}/pending-approval")

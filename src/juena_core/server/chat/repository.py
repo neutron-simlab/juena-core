@@ -142,7 +142,20 @@ async def load_thread_messages(thread_id: str) -> list[ChatMessage]:
 
     include_tool_payloads = settings().STREAM_TOOL_PAYLOADS
     messages: list[ChatMessage] = []
-    for message in checkpoint.get("channel_values", {}).get("messages", []):
+    values = checkpoint.get("channel_values", {})
+    # Undelivered corrections are transcript entries, never model history.
+    receipts = {}
+    for receipt in values.get("unapplied_steering", []):
+        anchor = receipt.additional_kwargs["steering"].get("after_message_id")
+        receipts.setdefault(anchor, []).append(receipt)
+    transcript = []
+    for message in values.get("messages", []):
+        transcript.append(message)
+        transcript.extend(receipts.pop(message.id, []))
+    # A summarizer may have evicted the anchor; keep its receipts in order.
+    for remaining in receipts.values():
+        transcript.extend(remaining)
+    for message in transcript:
         if not isinstance(message, BaseMessage) or isinstance(message, SystemMessage):
             continue
         # Tool results are activity, not transcript. The live stream reports

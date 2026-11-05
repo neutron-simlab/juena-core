@@ -21,10 +21,10 @@ __all__ = [
     "MAX_FILE_ARTIFACT_BYTES",
 ]
 
-JobStatus = Literal["queued", "running", "completed", "failed", "timed_out"]
+JobStatus = Literal["queued", "running", "completed", "failed", "timed_out", "cancelled"]
 
 ACTIVE_STATUSES = ("queued", "running")
-TERMINAL_STATUSES = ("completed", "failed", "timed_out")
+TERMINAL_STATUSES = ("completed", "failed", "timed_out", "cancelled")
 
 # The worker selects a bounded set of filenames from its workspace. The
 # application validates the bytes again through ArtifactStore before delivery.

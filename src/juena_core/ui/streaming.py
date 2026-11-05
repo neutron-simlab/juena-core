@@ -44,6 +44,7 @@ import streamlit as st
 from juena_core.clients.base import AgentClientError
 from juena_core.schema.interrupts import CLARIFICATION_KIND
 from juena_core.schema.server import ChatMessage
+from juena_core.ui.run_stream import get_stream_controller, start_resume
 from juena_core.ui.components import (
     activity_line,
     activity_summary,
@@ -64,6 +65,8 @@ __all__ = [
     "stream_and_display_response",
     "stream_and_display_resume",
     "render_pending_interrupt",
+    "render_running_response",
+    "update_instruction_messages",
 ]
 
 #: Every ``st.session_state`` name this module touches. The page owns the first
@@ -240,6 +243,7 @@ def process_stream_chunk(
     message_placeholder: Any,
     messages: list[Any],
     pending_artifacts: list[dict[str, Any]] | None = None,
+    *, render: bool = True,
 ) -> tuple[str, bool]:
     """Fold one content chunk into the transcript and the placeholder.
 
@@ -286,13 +290,13 @@ def process_stream_chunk(
             messages.append(chunk)
 
         if chunk.type == "ai":
-            if chunk.custom_data.get("artifacts"):
+            if render and chunk.custom_data.get("artifacts"):
                 finalize_streaming_message(
                     message_placeholder,
                     chunk.content,
                     chunk.custom_data,
                 )
-            else:
+            elif render:
                 finalize_streaming_message(message_placeholder, chunk.content)
             response_text = chunk.content
 
@@ -303,7 +307,8 @@ def process_stream_chunk(
             token_content = client.get_token_content(chunk) or ""
             if token_content:
                 response_text += token_content
-                render_streaming_token(response_text, message_placeholder)
+                if render:
+                    render_streaming_token(response_text, message_placeholder)
         return response_text, received_complete_message
 
     return response_text, received_complete_message
@@ -550,6 +555,10 @@ def stream_and_display_resume(
     checked_threads = set(st.session_state.get("approval_checked_threads") or ())
     checked_threads.discard(thread_id)
     st.session_state.approval_checked_threads = checked_threads
+
+    if st.session_state.get("run_controls", False):
+        start_resume(interrupt, kind=kind, **fields)
+        return
 
     def resume_chunks():
         try:
@@ -943,3 +952,186 @@ def render_pending_interrupt(
         _render_pending_approval(pending, approval, custom_status)
         return True
     return False
+
+
+def update_instruction_messages(snapshot):
+    """Merge acceptance and delivery echoes into one transcript entry per ID."""
+    for item in snapshot.get("instructions", []):
+        message = ChatMessage(
+            id=f"steering:{snapshot['run_id']}:{item['id']}",
+            type="human",
+            content=item["text"],
+            custom_data={
+                "steering": {
+                    **item,
+                    "instruction_id": item["id"],
+                    "run_id": snapshot["run_id"],
+                }
+            },
+        )
+        if not _replace_message_by_id(st.session_state.messages, message):
+            st.session_state.messages.append(message)
+
+
+def render_running_response(*, custom_status=None):
+    """Mount only while a reader exists; the fragment never waits on HTTP."""
+    controller = get_stream_controller()
+    if (
+        controller.thread is not None
+        and controller.thread_id == st.session_state.thread_id
+    ):
+        _render_response_fragment(custom_status=custom_status)
+
+
+@st.fragment(run_every=0.25)
+def _render_response_fragment(*, custom_status=None):
+    controller = get_stream_controller()
+    view = controller.view
+    custom_status = custom_status or {}
+    with st.chat_message("assistant"):
+        status = st.status(view.label, expanded=not view.complete)
+        answer = st.empty()
+        activity = ActivityLog(status, view.steps)
+        for chunk in controller.drain():
+            if isinstance(chunk, dict) and chunk.get("type") == "run":
+                update_instruction_messages(chunk)
+            elif is_status_chunk(chunk, custom_status):
+                apply_status_chunk(activity, chunk, custom_status)
+                view.label = chunk.get("label") or view.label
+            elif is_artifact_chunk(chunk):
+                view.artifacts.append(chunk)
+            elif is_interrupt_chunk(chunk):
+                view.interrupt = chunk
+                pending = dict(st.session_state.get("pending_approvals") or {})
+                pending[controller.thread_id] = chunk
+                st.session_state.pending_approvals = pending
+            elif isinstance(chunk, dict) and chunk.get("type") == "error":
+                controller.error = chunk.get("content", "Response failed")
+            else:
+                view.text, view.complete = process_stream_chunk(
+                    chunk,
+                    st.session_state.client,
+                    view.text,
+                    view.complete,
+                    answer,
+                    st.session_state.messages,
+                    view.artifacts,
+                    render=False,
+                )
+                if isinstance(chunk, ChatMessage) and chunk.type == "ai":
+                    view.last_message = chunk
+        view.steps = activity.steps
+        if view.text:
+            finalize_streaming_message(
+                answer,
+                view.text,
+                view.last_message.custom_data if view.last_message else {},
+            )
+        if controller.error:
+            st.error(controller.error)
+        run = controller.run
+        labels = {
+            "stopping": "Stopping…",
+            "cancelled": "Stopped",
+            "failed": "Failed",
+            "paused": "Waiting for your answer",
+        }
+        record = {"steps": view.steps, "seconds": time.monotonic() - view.started}
+        label = labels.get(
+            run.get("state"),
+            activity_summary(record)
+            if not controller.active and view.steps
+            else view.label,
+        )
+        if controller.error or run.get("error"):
+            display_state = "error"
+        elif controller.active:
+            display_state = "running"
+        else:
+            display_state = "complete"
+        status.update(label=label, state=display_state, expanded=not view.complete)
+        if run.get("error"):
+            st.error(run["error"])
+        for instruction in run.get("instructions", []):
+            st.caption(
+                {
+                    "received": "Received",
+                    "applied": "Applied",
+                    "not_applied": "Not applied",
+                }[instruction["status"]]
+                + ": "
+                + instruction["text"]
+            )
+        if controller.active and run.get("run_id"):
+            if st.button(
+                "Stop",
+                disabled=run.get("state") not in {"preparing", "running"},
+                key=f"stop:{run['run_id']}",
+            ):
+                try:
+                    controller.run = st.session_state.client.stop_run(
+                        controller.thread_id, run["run_id"]
+                    )
+                    st.rerun(scope="fragment")
+                except AgentClientError as exc:
+                    st.error(str(exc))
+
+    if not controller.active:
+        if controller.error and view.resume_interrupt:
+            pending = dict(st.session_state.get("pending_approvals") or {})
+            pending[controller.thread_id] = view.resume_interrupt
+            st.session_state.pending_approvals = pending
+            interrupt_id = view.resume_interrupt["interrupt_id"]
+            st.session_state.pop(
+                _decision_key(controller.thread_id, interrupt_id), None
+            )
+            st.session_state.pop(_answer_key(controller.thread_id, interrupt_id), None)
+        if controller.error or run.get("error"):
+            st.session_state.messages.append(
+                ChatMessage(
+                    id=f"failed:{run['run_id']}" if run.get("run_id") else None,
+                    type="ai",
+                    content=controller.error or run["error"],
+                    custom_data={"run_status": "failed"},
+                )
+            )
+        if view.text and not view.complete:
+            st.session_state.messages.append(
+                ChatMessage(
+                    type="ai",
+                    content=view.text,
+                    custom_data={
+                        "run_status": run.get("state"),
+                        "artifacts": _newest_per_workspace_file(view.artifacts),
+                    },
+                )
+            )
+        if run.get("state") == "cancelled":
+            st.session_state.messages.append(
+                ChatMessage(
+                    id=f"stopped:{run['run_id']}",
+                    type="ai",
+                    content="Response stopped.",
+                    custom_data={"run_status": "cancelled"},
+                )
+            )
+        if view.interrupt:
+            pending = dict(st.session_state.get("pending_activity") or {})
+            pending[controller.thread_id] = {
+                "steps": view.steps,
+                "seconds": time.monotonic() - view.started,
+            }
+            st.session_state.pending_activity = pending
+        elif view.steps:
+            for message in reversed(st.session_state.messages):
+                if isinstance(message, ChatMessage) and message.type == "ai":
+                    message.custom_data["activity"] = record
+                    break
+        refresh = st.session_state.setdefault("filesystem_refresh", {})
+        refresh[controller.thread_id] = refresh.get(controller.thread_id, 0) + 1
+        controller.thread = None
+        st.rerun(scope="app")
+    state = (run.get("run_id"), run.get("state"))
+    if run and st.session_state.get("composer_run_state") != state:
+        st.session_state.composer_run_state = state
+        st.rerun(scope="app")

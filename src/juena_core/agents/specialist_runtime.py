@@ -37,6 +37,7 @@ from juena_core.agents.backends import (
 )
 from juena_core.agents.delegation import AttachUserMessageMiddleware, with_delegation_boundary
 from juena_core.agents.loop_guard import RepeatedToolCallMiddleware
+from juena_core.agents.steering import SteeringMiddleware
 from juena_core.agents.specialist_outcome import (
     ReportWhenToolsRunOutMiddleware,
     SpecialistOutcomeMiddleware,
@@ -346,6 +347,7 @@ def build_specialist_middleware(
 
     middleware: list[Any] = [
         SpecialistOutcomeMiddleware(specialist_name=specialist_name),
+        SteeringMiddleware(specialist_name),
         RepeatedToolCallMiddleware(),
     ]
     if has_authored_skills(skills_dir):
@@ -448,6 +450,7 @@ def build_supervisor_middleware(
         create_summarization_middleware(summarizer_model, backend),
         PatchToolCallsMiddleware(),
         *extra,
+        SteeringMiddleware("supervisor"),
         RuntimeModelMiddleware(),
         *resilience_middleware(
             fallback_models,

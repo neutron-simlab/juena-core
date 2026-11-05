@@ -58,7 +58,12 @@ def with_user_message(description: str, messages: Sequence[Any]) -> str:
     Nothing is added when the brief already contains the message word for word.
     """
 
-    user = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+    # Corrections have their own delivery path into each specialist. Attaching
+    # one here would both duplicate it and drop the original specification.
+    user = next((
+        m for m in reversed(messages)
+        if isinstance(m, HumanMessage) and "steering" not in m.additional_kwargs
+    ), None)
     text = user.text.strip() if user is not None else ""
     if not text or text in description:
         return description
