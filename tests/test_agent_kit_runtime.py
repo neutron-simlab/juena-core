@@ -79,6 +79,7 @@ def test_supervisor_stack_has_one_exact_extra_splice_point() -> None:
         "FilesystemMiddleware",
         "MemoryMiddleware",
         "SubAgentMiddleware",
+        "AttachUserMessageMiddleware",
         "_DeepAgentsSummarizationMiddleware",
         "PatchToolCallsMiddleware",
         "FirstExtra",

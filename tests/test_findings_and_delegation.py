@@ -184,3 +184,108 @@ def test_persisted_findings_are_shape_and_namespace_validated() -> None:
     assert value == {
         "/findings/valid.md": {"content": "ok", "encoding": "utf-8"}
     }
+
+
+# The user's message reaches the specialist even when the brief leaves it out.
+
+SPEC = "Write fit.py: read q, I, dI from data.dat, fit a sphere, report R in nm."
+
+
+def _supervisor_brief(description: str):  # noqa: ANN202
+    """Run the real supervisor stack once and return the brief the specialist got.
+
+    The user's turn is built by the server's own input builder, and the supervisor
+    model asks for the specialist through the real `task` tool.
+    """
+
+    import asyncio
+    from uuid import uuid4
+
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langgraph.store.memory import InMemoryStore
+
+    from juena_core.agents.backends import build_supervisor_backend
+    from juena_core.agents.specialist_runtime import build_supervisor_middleware
+    from juena_core.server.agent.input_handler import AgentInputHandler
+
+    class ToolModel(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):  # noqa: ANN001, ANN003
+            return self
+
+    specialist = _Recorder()
+    supervisor = create_agent(
+        model=ToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "task",
+                        "args": {"description": description, "subagent_type": "software"},
+                        "id": "call-1",
+                    }],
+                ),
+                AIMessage(content="done"),
+            ]
+        ),
+        middleware=build_supervisor_middleware(
+            backend=build_supervisor_backend(InMemoryStore()),
+            summarizer_model=ToolModel(responses=[AIMessage(content="summary")]),
+            fallback_models=[],
+            subagents=[{
+                "name": "software",
+                "description": "Write and check code.",
+                "runnable": specialist,
+            }],
+        ),
+    )
+    ids = {"thread_id": str(uuid4()), "user_id": str(uuid4())}
+    state = asyncio.run(supervisor.ainvoke(
+        AgentInputHandler.build_input(SPEC),
+        {"configurable": ids},
+        # No provider or model here, so the fake model above is not swapped out.
+        context=ids,
+    ))
+    brief = specialist.received["messages"][0].content
+    written = state["messages"][1].tool_calls[0]["args"]["description"]
+    return brief, written
+
+
+def test_a_brief_without_the_spec_reaches_the_specialist_with_it() -> None:
+    """The failure seen in the benchmark: "per the user's spec", and no spec."""
+
+    from juena_core.agents.delegation import USER_MESSAGE_NOTE
+
+    brief, written = _supervisor_brief("Write the script per the user's spec.")
+
+    assert brief.startswith("Write the script per the user's spec.")
+    assert USER_MESSAGE_NOTE in brief
+    assert f"<user_message>\n{SPEC}\n</user_message>" in brief
+    # The supervisor's own history keeps the brief as its model wrote it.
+    assert written == "Write the script per the user's spec."
+
+
+def test_a_brief_that_already_quotes_the_message_is_left_alone() -> None:
+    description = f"Do exactly this:\n{SPEC}"
+
+    brief, _ = _supervisor_brief(description)
+
+    assert brief == description
+
+
+def test_only_the_latest_user_message_is_attached() -> None:
+    """An earlier request may have been replaced; carrying it is the supervisor's job."""
+
+    from juena_core.agents.delegation import with_user_message
+    from juena_core.server.agent.input_handler import AgentInputHandler
+
+    messages = [
+        *AgentInputHandler.build_input("Plot it, but do not run anything.")["messages"],
+        AIMessage(content="Here is the plan."),
+        *AgentInputHandler.build_input(SPEC)["messages"],
+    ]
+
+    brief = with_user_message("Write the script.", messages)
+
+    assert SPEC in brief
+    assert "do not run anything" not in brief
