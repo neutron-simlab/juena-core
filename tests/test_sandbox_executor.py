@@ -224,6 +224,78 @@ def test_finished_container_is_always_removed(tmp_path) -> None:
     assert container.removed is True
 
 
+def test_cancellation_stops_and_removes_container_without_publishing_files(tmp_path) -> None:
+    executor = _executor(tmp_path)
+    stopped = []
+
+    class Running(_Container):
+        def stop(self, *, timeout):
+            stopped.append(timeout)
+
+    container = Running()
+    _with_container(executor, container)
+    checks = iter([False, True])
+    outcome = executor.run(_job(), cancelled=lambda: next(checks))
+    assert container.started and container.removed
+    assert stopped == [0]
+    assert outcome.status == "cancelled" and outcome.artifact_names == []
+
+
+def test_cancelled_before_start_never_creates_a_container(tmp_path) -> None:
+    executor = _executor(tmp_path)
+    # No client is installed: reaching container creation would fail this test.
+    outcome = executor.run(_job(), cancelled=lambda: True)
+    assert outcome.status == "cancelled"
+
+
+def test_foreground_polling_is_once_per_second_and_tolerates_podman_errors(tmp_path, monkeypatch):
+    from juena_core.sandbox import executor as module
+
+    now = 0.0
+    checks, reloads = [], []
+
+    def sleep(seconds):
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(module, "monotonic", lambda: now)
+    monkeypatch.setattr(module, "sleep", sleep)
+
+    class Running(_Container):
+        def reload(self):
+            reloads.append(now)
+            if now == 0:
+                raise RequestException("temporary Podman failure")
+            self.attrs = {"State": {"Running": now < 2, "ExitCode": 0}}
+
+    def cancelled():
+        checks.append(now)
+        return False
+
+    executor = _executor(tmp_path)
+    container = Running(output=b"done")
+    _with_container(executor, container)
+    outcome = executor.run(_job(), cancelled=cancelled)
+    assert outcome.status == "completed"
+    assert container.removed
+    assert reloads == [0, 1, 2]
+    assert checks == [0, 0, 1, 2]  # Pre-admission, then once per polling cycle.
+
+
+def test_cancelled_container_is_force_removed_if_stop_request_fails(tmp_path):
+    class Running(_Container):
+        def stop(self, **kwargs):
+            raise RequestException("temporary Podman failure")
+
+    executor = _executor(tmp_path)
+    container = Running()
+    _with_container(executor, container)
+    checks = iter([False, True])
+    outcome = executor.run(_job(), cancelled=lambda: next(checks))
+    assert outcome.status == "cancelled"
+    assert container.removed
+
+
 def test_worker_reports_every_kind_of_filtered_output(tmp_path, monkeypatch) -> None:
     executor = _executor(tmp_path)
     job = _job()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
+from contextlib import nullcontext
 from typing import Any
 
 from deepagents.backends.protocol import (
@@ -105,6 +106,7 @@ class PodmanSandboxBackend(BaseSandbox):
         user_id: str,
         thread_id: str,
         run_id: str | None,
+        control: Any = None,
     ) -> None:
         self._jobs = jobs
         self._workspaces = workspaces
@@ -113,6 +115,7 @@ class PodmanSandboxBackend(BaseSandbox):
         self._user_id = user_id
         self._thread_id = thread_id
         self._run_id = run_id
+        self._control = control
 
     @property
     def id(self) -> str:
@@ -129,6 +132,12 @@ class PodmanSandboxBackend(BaseSandbox):
             return
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        if self._control is not None:
+            self._control.sandbox_jobs = self._jobs
+        with self._control.operation() if self._control is not None else nullcontext():
+            return self._execute(command, timeout=timeout)
+
+    def _execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         config = sandbox_settings()
         effective_timeout = min(
             timeout or config.execution_timeout_seconds,
@@ -166,11 +175,14 @@ class PodmanSandboxBackend(BaseSandbox):
                 command=command,
                 timeout_seconds=effective_timeout,
                 max_output_bytes=config.max_output_bytes,
+                run_id=self._run_id,
                 status_callback=lambda status: self._status(
                     status,
                     STATUS_LABELS.get(status, "Sandbox command running"),
                 ),
             )
+            if self._control is not None:
+                self._control.check()
             attached: list[ArtifactRef] = []
             dropped: list[tuple[str, str]] = []
             paths = [f"/workspace/outputs/{name}" for name in result.artifact_names]

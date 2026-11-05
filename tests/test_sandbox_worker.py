@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -92,7 +93,8 @@ class _Executor:
     def close(self) -> None:
         self.events.append("close")
 
-    def run(self, job):
+    def run(self, job, *, cancelled=None):
+        self.cancellation_check = cancelled
         self.events.append("run")
         if isinstance(self.outcome, Exception):
             raise self.outcome
@@ -126,6 +128,14 @@ def test_completed_job_is_committed_with_its_artifacts() -> None:
             "artifact_names": ["plot.png"],
         }
     ]
+
+
+def test_worker_only_polls_cancellation_for_foreground_jobs():
+    for run_id in (None, "foreground"):
+        job = replace(_job(), run_id=run_id)
+        executor = _Executor(ExecutionOutcome("completed", "", 0, False, []))
+        _worker(_Jobs([job]), executor)._execute(job)
+        assert (executor.cancellation_check is not None) == (run_id is not None)
 
 
 def test_executor_failure_still_writes_a_terminal_row() -> None:
@@ -189,7 +199,7 @@ def test_terminal_update_failure_stops_the_worker_slot() -> None:
     assert len(fatal) == 1
 
 
-def test_cleanup_failure_is_terminal_after_job_is_failed() -> None:
+def test_cleanup_failure_keeps_the_job_active_until_container_cleanup() -> None:
     job = _job()
     jobs = _Jobs([job])
     worker = _worker(jobs, _Executor(ContainerCleanupError("remove failed")))
@@ -201,7 +211,7 @@ def test_cleanup_failure_is_terminal_after_job_is_failed() -> None:
     else:
         raise AssertionError("cleanup failure did not escape the job boundary")
 
-    assert jobs.finished[0]["status"] == "failed"
+    assert jobs.finished == []
 
 
 def test_startup_removes_containers_and_fails_interrupted_jobs() -> None:

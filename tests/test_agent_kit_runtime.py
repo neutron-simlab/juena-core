@@ -84,6 +84,7 @@ def test_supervisor_stack_has_one_exact_extra_splice_point() -> None:
         "PatchToolCallsMiddleware",
         "FirstExtra",
         "SecondExtra",
+        "SteeringMiddleware",
         "RuntimeModelMiddleware",
         "ModelFallbackMiddleware",
         "ModelRetryMiddleware",
@@ -219,8 +220,9 @@ def test_a_specialist_can_have_no_filesystem_at_all(
     assert not [
         item for item in stack if type(item).__name__ == "FilesystemMiddleware"
     ]
-    assert [type(item).__name__ for item in stack][:3] == [
+    assert [type(item).__name__ for item in stack][:4] == [
         "SpecialistOutcomeMiddleware",
+        "SteeringMiddleware",
         "RepeatedToolCallMiddleware",
         "_DeepAgentsSummarizationMiddleware",
     ]
@@ -262,8 +264,9 @@ def test_specialist_execution_and_approval_are_a_paired_tail(
 
     assert stack[-2] is execution
     assert isinstance(stack[-1], HumanInTheLoopMiddleware)
-    assert _names(stack[:3]) == [
+    assert _names(stack[:4]) == [
         "SpecialistOutcomeMiddleware",
+        "SteeringMiddleware",
         "RepeatedToolCallMiddleware",
         "FilesystemMiddleware",
     ]

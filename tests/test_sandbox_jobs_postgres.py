@@ -80,6 +80,41 @@ try:
 
     removed = jobs.cleanup(older_than=datetime.now(UTC) + timedelta(seconds=1))
     assert removed == 2
+
+    # Queued cancellation wins against claiming, without occupying capacity.
+    queued = jobs.create(tenant_id="1"*64, workspace_id="a"*64,
+        command="must not start", timeout_seconds=10, max_output_bytes=1000,
+        run_id="queued-run")
+    assert jobs.cancel_run("queued-run") == 0
+    assert jobs.get(queued.id).status == "cancelled"
+    assert jobs.claim() is None
+
+    # Running cancellation retains the workspace until the worker acknowledges
+    # container cleanup. A late successful result cannot publish artifacts.
+    running = jobs.create(tenant_id="1"*64, workspace_id="a"*64,
+        command="running", timeout_seconds=10, max_output_bytes=1000,
+        run_id="running-run")
+    assert jobs.claim().id == running.id
+    assert jobs.cancel_run("running-run") == 1
+    assert jobs.get(running.id).status == "running"
+    with jobs.workspace_guard("a"*64) as available:
+        assert available is False
+    finished = jobs.finish(running.id, status="completed", output="late result", artifact_names=["unverified.png"])
+    assert finished.status == "cancelled"
+    assert finished.artifact_names == ()
+    assert jobs.cancel_run("running-run") == 0
+    with jobs.workspace_guard("a"*64) as available:
+        assert available is True
+
+    # Worker recovery preserves cancellation rather than making it runnable.
+    recovery = jobs.create(tenant_id="1"*64, workspace_id="a"*64,
+        command="interrupted", timeout_seconds=10, max_output_bytes=1000,
+        run_id="recovery-run")
+    assert jobs.claim().id == recovery.id
+    assert jobs.cancel_run("recovery-run") == 1
+    jobs.fail_active("worker restarted after cleanup")
+    assert jobs.get(recovery.id).status == "cancelled"
+    assert jobs.claim() is None
 finally:
     jobs.close()
     engine.dispose()

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import weakref
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Generator, Mapping, Sequence
 from typing import Any, NoReturn
 
 import httpx
@@ -533,6 +533,71 @@ class BaseAgentClient:
         ``clarification`` is; an approval belongs to whichever application
         registered it, under whatever name that application chose.
         """
+        url, kwargs = self._build_resume_request(
+            thread_id=thread_id, interrupt_id=interrupt_id, kind=kind,
+            model=model, provider=provider, **fields,
+        )
+        yield from self._iter_stream(url, **kwargs)
+
+    async def _aiter_stream(
+        self, url: str, **kwargs: Any
+    ) -> AsyncGenerator[ChatMessage | dict[str, Any], None]:
+        """Own the async connection in the caller's event loop."""
+        try:
+            async with httpx.AsyncClient() as transport:
+                async with transport.stream("POST", url, **kwargs) as response:
+                    if response.is_error:
+                        await response.aread()
+                    response.raise_for_status()
+                    async for event in EventSource(response).aiter_sse():
+                        parsed = self._parse_sse_data(event.data)
+                        if parsed is not None:
+                            yield parsed
+        except httpx.HTTPError as exc:
+            _raise_http_error(exc)
+        except SSEError as exc:
+            raise AgentClientError(f"Error: {exc}") from exc
+
+    async def astream(
+        self,
+        message: str,
+        model: str | None = None,
+        provider: str | None = None,
+        thread_id: str | None = None,
+        attachments: Sequence[Any] | None = None,
+    ) -> AsyncGenerator[ChatMessage | dict[str, Any], None]:
+        """Stream a turn without sharing the client's synchronous connection."""
+        url, kwargs = self._build_stream_request(
+            message, model, provider, thread_id, attachments
+        )
+        async for chunk in self._aiter_stream(url, **kwargs):
+            yield chunk
+
+    async def aresume_stream(
+        self,
+        *,
+        thread_id: str,
+        interrupt_id: str,
+        kind: str,
+        model: str | None = None,
+        provider: str | Provider | None = None,
+        **fields: Any,
+    ) -> AsyncGenerator[ChatMessage | dict[str, Any], None]:
+        """Resume an interrupt on a connection owned by the calling event loop."""
+        url, kwargs = self._build_resume_request(
+            thread_id=thread_id,
+            interrupt_id=interrupt_id,
+            kind=kind,
+            model=model,
+            provider=provider,
+            **fields,
+        )
+        async for chunk in self._aiter_stream(url, **kwargs):
+            yield chunk
+
+    def _build_resume_request(
+        self, *, thread_id, interrupt_id, kind, model=None, provider=None, **fields
+    ):
         agent = self._require_agent()
         payload: dict[str, Any] = {
             "thread_id": thread_id,
@@ -545,12 +610,35 @@ class BaseAgentClient:
         if provider_value := _provider_value(provider):
             payload["provider"] = provider_value
 
-        yield from self._iter_stream(
-            f"{self.base_url}/{agent}/resume",
-            json=payload,
-            headers=self._headers,
-            timeout=self._stream_timeout(),
+        return f"{self.base_url}/{agent}/resume", {
+            "json": payload,
+            "headers": self._headers,
+            "timeout": self._stream_timeout(),
+        }
+
+    def _run_control(self, thread_id, run_id, action, **kwargs):
+        url = f"{self.base_url}/threads/{thread_id}/runs/{run_id}{action}"
+        try:
+            response = self._client.post(
+                url, headers=self._headers, timeout=self.timeout, **kwargs
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as exc:
+            _raise_http_error(exc)
+
+    def steer_run(
+        self, thread_id: str, run_id: str, instruction_id: str, text: str
+    ) -> dict:
+        return self._run_control(
+            thread_id,
+            run_id,
+            "/steer",
+            json={"instruction_id": instruction_id, "text": text},
         )
+
+    def stop_run(self, thread_id: str, run_id: str) -> dict:
+        return self._run_control(thread_id, run_id, "/stop")
 
     # ------------------------------------------------------------------
     # Threads and artifacts

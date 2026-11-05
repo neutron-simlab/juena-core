@@ -3,15 +3,21 @@
 import io
 import warnings
 from contextlib import contextmanager
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from deepagents.backends import StateBackend
 from deepagents.backends.protocol import BackendProtocol, LsResult
 from deepagents.middleware.filesystem import FilesystemMiddleware, supports_execution
-from langchain_core.messages import HumanMessage
+from deepagents.middleware.subagents import SubAgentMiddleware
+from langchain.agents import create_agent
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, HumanMessage
 from PIL import Image
 
+from juena_core.agents.delegation import with_delegation_boundary
 from juena_core.agents.specialist_outcome import SpecialistOutcomeMiddleware
 from juena_core.artifacts import (
     MAX_IMAGE_ARTIFACTS_PER_TURN,
@@ -31,6 +37,8 @@ from juena_core.sandbox.runtime import (
     set_workspace_store_for_tests,
 )
 from juena_core.sandbox.workspace import WorkspaceStore
+from juena_core.server.agent.runtime_model_middleware import RuntimeModelContext
+from juena_core.server.run_control import RunControl
 
 SANDBOX_TIMEOUT_SECONDS = 600
 
@@ -76,6 +84,128 @@ class _Jobs:
             status="completed",
             artifact_names=("analysis.py",),
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_mapping", [False, True])
+async def test_delegated_execute_uses_foreground_control_id(tmp_path, context_mapping):
+    """Exercise the real execute tool and backend after Deep Agents delegates.
+
+    The child loses the parent's config run_id. Only the inherited foreground
+    control identifies the job that Stop must cancel.
+    """
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    run = RunControl(thread_id="thread-a", user_id="user-a")
+    context = RuntimeModelContext(
+        provider="blablador",
+        model="fixture",
+        user_id="user-a",
+        thread_id="thread-a",
+        run_id=run.id,
+    )
+    if context_mapping:
+        context = {**asdict(context), "control": run}
+    else:
+        context = replace(context, control=run)
+    workspaces = WorkspaceStore(tmp_path / "workspaces")
+    jobs = _Jobs(workspaces)
+    store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
+    set_sandbox_jobs_for_tests(jobs)
+    set_workspace_store_for_tests(workspaces)
+    set_artifact_store_for_tests(store)
+    specialist = create_agent(
+        Model(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "execute",
+                            "args": {"command": "sleep 120"},
+                            "id": "execute-1",
+                        }
+                    ],
+                ),
+                AIMessage(content="report"),
+            ]
+        ),
+        middleware=[FilesystemMiddleware(backend=RuntimePodmanSandboxBackend())],
+    )
+    supervisor = create_agent(
+        Model(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {
+                                "subagent_type": "software",
+                                "description": "Run the command",
+                            },
+                            "id": "delegate-1",
+                        }
+                    ],
+                ),
+                AIMessage(content="answer"),
+            ]
+        ),
+        middleware=[
+            SubAgentMiddleware(
+                backend=lambda runtime: StateBackend(runtime),
+                subagents=with_delegation_boundary(
+                    [
+                        {
+                            "name": "software",
+                            "description": "Software specialist",
+                            "runnable": specialist,
+                        }
+                    ]
+                ),
+            )
+        ],
+    )
+    try:
+        await supervisor.ainvoke(
+            {"messages": [HumanMessage("Run the command")]},
+            {"configurable": {"thread_id": "thread-a"}, "run_id": uuid4()},
+            context=context,
+        )
+        assert len(jobs.requests) == 1
+        assert jobs.requests[0]["run_id"] == run.id
+        assert run.sandbox_jobs is jobs
+        assert run.operations == 0
+    finally:
+        set_sandbox_jobs_for_tests(None)
+        set_workspace_store_for_tests(None)
+        set_artifact_store_for_tests(None)
+
+
+@pytest.mark.parametrize("run_id", [None, "legacy-run"])
+def test_runtime_without_control_keeps_existing_run_id(monkeypatch, tmp_path, run_id):
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(user_id="user-a", thread_id="thread-a"),
+        config={"run_id": run_id},
+    )
+    monkeypatch.setattr("juena_core.sandbox.runtime.get_runtime", lambda: runtime)
+    workspaces = WorkspaceStore(tmp_path / "workspaces")
+    jobs = _Jobs(workspaces)
+    set_sandbox_jobs_for_tests(jobs)
+    set_workspace_store_for_tests(workspaces)
+    set_artifact_store_for_tests(
+        ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
+    )
+    try:
+        RuntimePodmanSandboxBackend().execute("printf done")
+        assert jobs.requests[0]["run_id"] == run_id
+    finally:
+        set_sandbox_jobs_for_tests(None)
+        set_workspace_store_for_tests(None)
+        set_artifact_store_for_tests(None)
 
 
 def test_execute_returns_command_output_and_collected_file(tmp_path) -> None:

@@ -127,6 +127,8 @@ def langchain_to_chat_message(message: BaseMessage) -> ChatMessage:
                 id=message_id,
                 content=display_text_from(message),
             )
+            if steering := message.additional_kwargs.get("steering"):
+                human_message.custom_data["steering"] = steering
             if attachments := display_attachments_from(message):
                 human_message.custom_data["attachments"] = attachments
             return human_message
@@ -136,6 +138,8 @@ def langchain_to_chat_message(message: BaseMessage) -> ChatMessage:
                 id=message_id,
                 content=answer_text_from(message),
             )
+            if run_status := message.additional_kwargs.get("run_status"):
+                ai_message.custom_data["run_status"] = run_status
             if message.tool_calls:
                 ai_message.tool_calls = message.tool_calls
             if message.response_metadata:

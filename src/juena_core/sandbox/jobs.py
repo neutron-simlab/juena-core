@@ -45,7 +45,7 @@ _DATABASE_URL_PREFIXES = ("postgresql+psycopg://", "postgresql://", "postgres://
 _COLUMNS = (
     "id, tenant_id, workspace_id, command, timeout_seconds, max_output_bytes, "
     "status, output, exit_code, truncated, artifact_names, created_at, "
-    "started_at, finished_at"
+    "started_at, finished_at, run_id, cancel_requested"
 )
 
 
@@ -78,6 +78,8 @@ class SandboxJobRecord:
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    run_id: str | None = None
+    cancel_requested: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +108,8 @@ def _record(row: dict) -> SandboxJobRecord:
         created_at=row["created_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
+        run_id=row.get("run_id"),
+        cancel_requested=row.get("cancel_requested", False),
     )
 
 
@@ -170,6 +174,7 @@ class SandboxJobs:
         command: str,
         timeout_seconds: int,
         max_output_bytes: int,
+        run_id: str | None = None,
     ) -> SandboxJobRecord | None:
         """Admit a job without racing capacity or workspace file operations."""
 
@@ -192,9 +197,9 @@ class SandboxJobs:
                 INSERT INTO sandbox_jobs (
                     id, tenant_id, workspace_id, command, timeout_seconds,
                     max_output_bytes, status, output, truncated, artifact_names,
-                    created_at
+                    created_at, run_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, 'queued', '', false, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, 'queued', '', false, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 RETURNING {_COLUMNS}
                 """,
@@ -207,6 +212,7 @@ class SandboxJobs:
                     max_output_bytes,
                     Jsonb([]),
                     datetime.now(UTC),
+                    run_id,
                 ),
             ).fetchone()
         return _record(row) if row is not None else None
@@ -220,6 +226,7 @@ class SandboxJobs:
         timeout_seconds: int,
         max_output_bytes: int,
         status_callback: Callable[[str], None] | None = None,
+        run_id: str | None = None,
     ) -> SandboxExecutionResult:
         """Submit one command and wait for its terminal row."""
 
@@ -231,6 +238,7 @@ class SandboxJobs:
             command=command,
             timeout_seconds=timeout_seconds,
             max_output_bytes=max_output_bytes,
+            run_id=run_id,
         )
         if job is None:
             return SandboxExecutionResult("busy", "Sandbox capacity or workspace is busy")
@@ -288,7 +296,7 @@ class SandboxJobs:
                 SET status = 'running', started_at = %s
                 WHERE id = (
                     SELECT id FROM sandbox_jobs
-                    WHERE status = 'queued' AND created_at >= %s
+                    WHERE status = 'queued' AND NOT cancel_requested AND created_at >= %s
                     ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
                 )
                 RETURNING {_COLUMNS}
@@ -321,8 +329,10 @@ class SandboxJobs:
             row = connection.execute(
                 f"""
                 UPDATE sandbox_jobs
-                SET status = %s, output = %s, exit_code = %s, truncated = %s,
-                    artifact_names = %s, finished_at = %s
+                SET status = CASE WHEN cancel_requested THEN 'cancelled' ELSE %s END,
+                    output = %s, exit_code = %s, truncated = %s,
+                    artifact_names = CASE WHEN cancel_requested THEN '[]'::jsonb ELSE %s END,
+                    finished_at = %s
                 WHERE id = %s AND status = ANY(%s)
                 RETURNING {_COLUMNS}
                 """,
@@ -339,12 +349,28 @@ class SandboxJobs:
             ).fetchone()
         return _record(row) if row is not None else self.get(job_id)
 
+    def cancel_run(self, run_id: str) -> int:
+        """Cancel queued jobs; running slots retain ownership until cleanup."""
+        with self.pool.connection() as connection, connection.transaction():
+            connection.execute(
+                "UPDATE sandbox_jobs SET cancel_requested = true, "
+                "status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END, "
+                "finished_at = CASE WHEN status = 'queued' THEN %s ELSE finished_at END "
+                "WHERE run_id = %s AND status = ANY(%s)",
+                (datetime.now(UTC), run_id, list(ACTIVE_STATUSES)),
+            )
+            row = connection.execute(
+                "SELECT count(*) AS count FROM sandbox_jobs WHERE run_id = %s AND status = ANY(%s)",
+                (run_id, list(ACTIVE_STATUSES)),
+            ).fetchone()
+            return row["count"]
+
     def fail_active(self, output: str) -> int:
         """Fail every row left by a previous worker process."""
 
         with self.pool.connection() as connection:
             return connection.execute(
-                "UPDATE sandbox_jobs SET status = 'failed', output = %s, "
+                "UPDATE sandbox_jobs SET status = CASE WHEN cancel_requested THEN 'cancelled' ELSE 'failed' END, output = %s, "
                 "finished_at = %s WHERE status = ANY(%s)",
                 (output, datetime.now(UTC), list(ACTIVE_STATUSES)),
             ).rowcount
