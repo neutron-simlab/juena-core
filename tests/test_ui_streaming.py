@@ -938,3 +938,147 @@ def test_a_paused_turn_resumes_with_its_steps(monkeypatch) -> None:
         ("Question for you: “Which model?”", "done")
     ]
     assert activity["seconds"] >= paused["seconds"]
+
+
+# --------------------------------------------------------------------------- #
+# The live view of a steerable reply
+# --------------------------------------------------------------------------- #
+
+
+class _FakeLiveStatus(_FakeStatus):
+    """The live view's status box; it also records lines drawn straight into it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.drawn: list[str] = []
+
+    def markdown(self, text):
+        self.drawn.append(text)
+
+
+class _FakeLivePage:
+    """Stand-in for st: what one redraw of the live view sends to the browser."""
+
+    def __init__(self, session_state) -> None:
+        self.session_state = session_state
+        self.empty_slots = 0
+        self.boxes: list[_FakeLiveStatus] = []
+
+    def chat_message(self, _role):
+        return _DummyContext()
+
+    def status(self, *_args, **_kwargs):
+        self.boxes.append(_FakeLiveStatus())
+        return self.boxes[-1]
+
+    def empty(self):
+        self.empty_slots += 1
+        return _FakeSlot()
+
+    def container(self):
+        return _DummyContext()
+
+    def button(self, *_args, **_kwargs):
+        return False
+
+    def caption(self, *_args, **_kwargs):
+        pass
+
+    def error(self, *_args, **_kwargs):
+        pass
+
+    def rerun(self, *_args, **_kwargs):
+        pass
+
+
+def test_live_view_redraws_in_final_form_without_empty_slots(monkeypatch) -> None:
+    """The live view is rebuilt every 0.25 s. An empty slot that the same
+    redraw fills later can reach the browser on its own, so the answer
+    vanished and the step list jumped four times a second while a sandbox
+    command ran. Every element must be drawn once, already final."""
+    from juena_core.ui.run_stream import StreamController
+
+    controller = StreamController()
+    controller.done = False  # A reply is running.
+    controller.thread_id = "thread-1"
+    controller.run = {"run_id": "run-1", "state": "running", "instructions": []}
+    sentence = "I'll start by checking the staged inputs and any background work."
+    for chunk in [
+        {"type": "token", "content": sentence},
+        *_server_chunks(
+            _call("read_file", {"file_path": "/inputs/a.dat"}, "c1"),
+            ToolMessage(content="data", tool_call_id="c1", name="read_file"),
+            _call("execute", {"command": "python fit.py"}, "c2"),
+        ),
+    ]:
+        controller.push(chunk)
+
+    session_state = _SessionState(
+        client=_FakeTokenClient([]),
+        messages=[],
+        thread_id="thread-1",
+        composer_run_state=("run-1", "running"),
+    )
+    page = _FakeLivePage(session_state)
+    drawn_text: list[str] = []
+    monkeypatch.setattr(streaming, "st", page)
+    monkeypatch.setattr(streaming, "get_stream_controller", lambda: controller)
+    monkeypatch.setattr(
+        streaming,
+        "finalize_streaming_message",
+        lambda _where, text, _custom_data=None: drawn_text.append(text),
+    )
+
+    redraw = streaming._render_response_fragment.__wrapped__
+    redraw(custom_status={})  # Applies the events that arrived.
+    redraw(custom_status={})  # Nothing new, as while a sandbox command runs.
+
+    steps = controller.view.steps
+    assert [step["state"] for step in steps] == ["done", "running"]
+    assert page.empty_slots == 0
+    assert all(box.slots == [] for box in page.boxes)
+    lines = [activity_line(step) for step in steps]
+    assert [box.drawn for box in page.boxes] == [lines, lines]
+    assert drawn_text == [sentence, sentence]
+
+
+def test_a_reader_finishing_mid_redraw_still_ends_with_its_final_state(monkeypatch) -> None:
+    """After Stop, the reader can push the final "cancelled" state and finish
+    while a redraw is drawing. Ending the reply in that redraw would use the
+    state it read before ("stopping"), and "Response stopped." never showed."""
+    from juena_core.ui.run_stream import StreamController
+
+    controller = StreamController()
+    controller.done = False
+    controller.thread = object()  # The live view is mounted while this is set.
+    controller.thread_id = "thread-1"
+    controller.run = {"run_id": "run-1", "state": "stopping", "instructions": []}
+    session_state = _SessionState(
+        client=_FakeTokenClient([]),
+        messages=[],
+        thread_id="thread-1",
+        composer_run_state=("run-1", "stopping"),
+    )
+    page = _FakeLivePage(session_state)
+    draw_box = page.status
+
+    def reader_finishes_while_drawing(*args, **kwargs):
+        controller.push(
+            {"type": "run", "run_id": "run-1", "thread_id": "thread-1",
+             "state": "cancelled", "error": None, "instructions": []}
+        )
+        controller.done = True
+        return draw_box(*args, **kwargs)
+
+    page.status = reader_finishes_while_drawing
+    monkeypatch.setattr(streaming, "st", page)
+    monkeypatch.setattr(streaming, "get_stream_controller", lambda: controller)
+
+    redraw = streaming._render_response_fragment.__wrapped__
+    redraw(custom_status={})
+    page.status = draw_box
+    if controller.thread is not None:  # As render_running_response mounts it.
+        redraw(custom_status={})
+
+    assert controller.thread is None
+    assert [m.content for m in session_state.messages] == ["Response stopped."]
