@@ -98,6 +98,10 @@ class ActivityLog:
     It is also what an application's status renderer receives, so it offers
     the two calls those renderers make on a status box: :meth:`write` adds a
     note and :meth:`update` relabels the box.
+
+    ``status`` may be ``None``: the log then only keeps the steps, and the
+    caller draws them. The live view of a steerable reply does that, because it
+    redraws everything every 0.25 s (see ``_render_response_fragment``).
     """
 
     def __init__(self, status: Any, steps: Iterable[dict[str, Any]] = ()) -> None:
@@ -141,7 +145,8 @@ class ActivityLog:
         """Relabel, open or close the status box."""
         if "state" in kwargs:
             self._complete = kwargs["state"] == "complete"
-        self._status.update(**kwargs)
+        if self._status is not None:
+            self._status.update(**kwargs)
 
     def _index(self, step_id: str | None) -> int | None:
         if step_id:
@@ -152,11 +157,13 @@ class ActivityLog:
 
     def _add(self, step: dict[str, Any]) -> None:
         self.steps.append(step)
-        self._slots.append(self._status.empty())
-        self._redraw(len(self.steps) - 1)
+        if self._status is not None:
+            self._slots.append(self._status.empty())
+            self._redraw(len(self.steps) - 1)
 
     def _redraw(self, index: int) -> None:
-        self._slots[index].markdown(activity_line(self.steps[index]))
+        if self._status is not None:
+            self._slots[index].markdown(activity_line(self.steps[index]))
 
 
 def _default_limits_caption(limits: Mapping[str, Any]) -> str:
@@ -988,10 +995,19 @@ def _render_response_fragment(*, custom_status=None):
     controller = get_stream_controller()
     view = controller.view
     custom_status = custom_status or {}
+    # Ask once, before draining, whether the reader is still running: a
+    # finished reader has pushed every event, so this redraw sees the final
+    # state. Asked again later, a reader finishing mid-redraw would end the
+    # reply with the state read before it (after Stop: "stopping", never
+    # "Response stopped."). The next redraw ends it instead.
+    running = controller.active
     with st.chat_message("assistant"):
         status = st.status(view.label, expanded=not view.complete)
-        answer = st.empty()
-        activity = ActivityLog(status, view.steps)
+        # This redraw runs four times a second, even when nothing new
+        # arrived. Draw no empty slot to fill later in the same redraw: such a
+        # slot can reach the browser on its own, and the answer and the step
+        # lines then flicker. So the steps are collected first, then drawn.
+        activity = ActivityLog(None, view.steps)
         for chunk in controller.drain():
             if isinstance(chunk, dict) and chunk.get("type") == "run":
                 update_instruction_messages(chunk)
@@ -1013,7 +1029,7 @@ def _render_response_fragment(*, custom_status=None):
                     st.session_state.client,
                     view.text,
                     view.complete,
-                    answer,
+                    None,
                     st.session_state.messages,
                     view.artifacts,
                     render=False,
@@ -1021,14 +1037,20 @@ def _render_response_fragment(*, custom_status=None):
                 if isinstance(chunk, ChatMessage) and chunk.type == "ai":
                     view.last_message = chunk
         view.steps = activity.steps
+        for step in view.steps:
+            status.markdown(activity_line(step))
         if view.text:
             finalize_streaming_message(
-                answer,
+                st.container(),
                 view.text,
                 view.last_message.custom_data if view.last_message else {},
             )
         if controller.error:
             st.error(controller.error)
+        # Read late, as the composer reads it just after this redraw: reading
+        # it early let the composer switch on before this redraw reran the
+        # page for the new state, and that rerun dropped a correction sent in
+        # between.
         run = controller.run
         labels = {
             "stopping": "Stopping…",
@@ -1040,12 +1062,12 @@ def _render_response_fragment(*, custom_status=None):
         label = labels.get(
             run.get("state"),
             activity_summary(record)
-            if not controller.active and view.steps
+            if not running and view.steps
             else view.label,
         )
         if controller.error or run.get("error"):
             display_state = "error"
-        elif controller.active:
+        elif running:
             display_state = "running"
         else:
             display_state = "complete"
@@ -1062,7 +1084,7 @@ def _render_response_fragment(*, custom_status=None):
                 + ": "
                 + instruction["text"]
             )
-        if controller.active and run.get("run_id"):
+        if running and run.get("run_id"):
             if st.button(
                 "Stop",
                 disabled=run.get("state") not in {"preparing", "running"},
@@ -1076,7 +1098,7 @@ def _render_response_fragment(*, custom_status=None):
                 except AgentClientError as exc:
                     st.error(str(exc))
 
-    if not controller.active:
+    if not running:
         if controller.error and view.resume_interrupt:
             pending = dict(st.session_state.get("pending_approvals") or {})
             pending[controller.thread_id] = view.resume_interrupt
