@@ -24,9 +24,27 @@ class SteeringMiddleware(AgentMiddleware[SteeringState]):
     state_schema = SteeringState
 
     def __init__(self, recipient: str):
+        """Initialize the middleware.
+
+        Args:
+            recipient: Name of this graph, recorded when its model receives a
+                correction.
+        """
         self.recipient = recipient
 
     def before_model(self, state, runtime):
+        """Add the corrections this graph has not seen yet to its messages.
+
+        Args:
+            state: The agent state.
+            runtime: The graph runtime, whose context carries the run control.
+
+        Returns:
+            A state update with the new corrections, or ``None``.
+
+        Raises:
+            asyncio.CancelledError: The user stopped the run.
+        """
         control = control_from(runtime.context)
         if control is None:
             return None
@@ -49,6 +67,18 @@ class SteeringMiddleware(AgentMiddleware[SteeringState]):
         }
 
     async def abefore_model(self, state, runtime):
+        """Async version of :meth:`before_model`.
+
+        Args:
+            state: The agent state.
+            runtime: The graph runtime, whose context carries the run control.
+
+        Returns:
+            A state update with the new corrections, or ``None``.
+
+        Raises:
+            asyncio.CancelledError: The user stopped the run.
+        """
         return self.before_model(state, runtime)
 
     def _model_control(self, request):
@@ -64,20 +94,68 @@ class SteeringMiddleware(AgentMiddleware[SteeringState]):
             control.applied(ids, f"{self.recipient}:{namespace}")
 
     def wrap_model_call(self, request, handler):
+        """Record which corrections reach the model, then call it.
+
+        Args:
+            request: The model request.
+            handler: Calls the model.
+
+        Returns:
+            The model's response.
+
+        Raises:
+            asyncio.CancelledError: The user stopped the run.
+        """
         self._model_control(request)
         return handler(request)
 
     async def awrap_model_call(self, request, handler):
+        """Async version of :meth:`wrap_model_call`.
+
+        Args:
+            request: The model request.
+            handler: Calls the model.
+
+        Returns:
+            The model's response.
+
+        Raises:
+            asyncio.CancelledError: The user stopped the run.
+        """
         self._model_control(request)
         return await handler(request)
 
     def wrap_tool_call(self, request, handler):
+        """Run a tool call unless the user stopped the run.
+
+        Args:
+            request: The tool-call request.
+            handler: Runs the request.
+
+        Returns:
+            The handler's result.
+
+        Raises:
+            asyncio.CancelledError: The user stopped the run.
+        """
         control = control_from(request.runtime.context)
         if control is not None:
             control.check()
         return handler(request)
 
     async def awrap_tool_call(self, request, handler):
+        """Async version of :meth:`wrap_tool_call`.
+
+        Args:
+            request: The tool-call request.
+            handler: Runs the request.
+
+        Returns:
+            The handler's result.
+
+        Raises:
+            asyncio.CancelledError: The user stopped the run.
+        """
         control = control_from(request.runtime.context)
         if control is not None:
             control.check()

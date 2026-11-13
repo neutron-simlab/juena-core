@@ -1,9 +1,7 @@
 """Helpers for detecting and normalizing equation markup in chat content.
 
-Ported verbatim from ``juena-chatbot/app/math_rendering.py`` (00-BOUNDARY.md,
-decision 7). Pure text transformation: no Streamlit, no application content,
-nothing to split. It lives under ``ui/`` because that is who calls it, not
-because it needs the ``[ui]`` extra — it imports only ``re``.
+Pure text transformation that imports only ``re``, so it does not need the
+``[ui]`` extra. It lives under ``ui/`` because the UI is what calls it.
 """
 
 from __future__ import annotations
@@ -99,7 +97,15 @@ STRONG_LATEX_COMMANDS = {
 
 
 def split_markdown_code_segments(content: str) -> list[tuple[str, bool]]:
-    """Split markdown into plain-text and code segments."""
+    """Split markdown into plain-text and code segments.
+
+    Args:
+        content: Markdown text.
+
+    Returns:
+        ``(text, is_code)`` pairs in order. Fenced blocks and inline code are
+        code; an unclosed fence or backtick stays plain text.
+    """
 
     segments: list[tuple[str, bool]] = []
     index = 0
@@ -155,7 +161,15 @@ def split_markdown_code_segments(content: str) -> list[tuple[str, bool]]:
 
 
 def normalize_math_aliases(segment: str) -> str:
-    """Normalize LaTeX alias delimiters to Streamlit-supported markdown math."""
+    """Normalize LaTeX alias delimiters to Streamlit-supported markdown math.
+
+    Args:
+        segment: Plain text outside code.
+
+    Returns:
+        The text with LaTeX's bracket delimiters turned into ``$`` inline math
+        and ``$$`` blocks on their own lines.
+    """
 
     normalized = INLINE_MATH_ALIAS_RE.sub(lambda match: f"${match.group(1)}$", segment)
 
@@ -219,7 +233,15 @@ def _looks_like_equation_fragment(text: str, math_start: int | None = None) -> b
 
 
 def repair_latex_delimiters_in_line(line: str) -> str:
-    """Repair missing inline-math delimiters for equation-like lines."""
+    """Repair missing inline-math delimiters for equation-like lines.
+
+    Args:
+        line: One line, without its line break.
+
+    Returns:
+        The line with the missing ``$`` added when it looks like an equation,
+        otherwise the line unchanged.
+    """
 
     prefix, body = _extract_list_prefix(line)
     if not body.strip():
@@ -241,7 +263,14 @@ def repair_latex_delimiters_in_line(line: str) -> str:
 
 
 def repair_latex_delimiters(content: str) -> str:
-    """Repair broken or missing inline-math delimiters on equation-like lines."""
+    """Repair broken or missing inline-math delimiters on equation-like lines.
+
+    Args:
+        content: Plain text outside code.
+
+    Returns:
+        The text with every line repaired.
+    """
 
     repaired_lines: list[str] = []
     for line in content.splitlines(keepends=True):
@@ -288,7 +317,14 @@ def _wrap_math_fragment(fragment: str) -> str:
 
 
 def repair_adjacent_math_fragments_in_line(line: str) -> str:
-    """Wrap bare equation fragments that appear next to valid inline math blocks."""
+    """Wrap bare equation fragments that appear next to valid inline math blocks.
+
+    Args:
+        line: One line, without its line break.
+
+    Returns:
+        The line with such fragments wrapped in ``$``.
+    """
 
     matches = list(INLINE_DOLLAR_MATH_RE.finditer(line))
     if not matches:
@@ -315,7 +351,14 @@ def repair_adjacent_math_fragments_in_line(line: str) -> str:
 
 
 def repair_adjacent_math_fragments(content: str) -> str:
-    """Repair bare equation fragments adjacent to valid inline math blocks."""
+    """Repair bare equation fragments adjacent to valid inline math blocks.
+
+    Args:
+        content: Plain text outside code.
+
+    Returns:
+        The text with every line repaired.
+    """
 
     repaired_lines: list[str] = []
     for line in content.splitlines(keepends=True):
@@ -352,7 +395,14 @@ def _repair_outside_display_math(segment: str) -> str:
 
 
 def normalize_math_markdown(content: str) -> str:
-    """Normalize supported math aliases while preserving markdown code segments."""
+    """Normalize supported math aliases while preserving markdown code segments.
+
+    Args:
+        content: Markdown text.
+
+    Returns:
+        The text ready for Streamlit's math rendering, with code untouched.
+    """
 
     normalized_segments = [
         (
@@ -366,7 +416,14 @@ def normalize_math_markdown(content: str) -> str:
 
 
 def has_supported_math_markup(segment: str) -> bool:
-    """Return whether a plain-text markdown segment contains supported math syntax."""
+    """Return whether a plain-text markdown segment contains supported math syntax.
+
+    Args:
+        segment: Plain text outside code.
+
+    Returns:
+        True when it holds a non-empty formula in any supported delimiter.
+    """
 
     patterns = (
         INLINE_MATH_ALIAS_RE,
@@ -378,7 +435,15 @@ def has_supported_math_markup(segment: str) -> bool:
 
 
 def content_contains_math_markup(content: Any) -> bool:
-    """Return True when string content includes supported math markup outside code."""
+    """Return True when string content includes supported math markup outside code.
+
+    Args:
+        content: Message content. Anything but a non-empty string gives False.
+
+    Returns:
+        True when text outside code holds math, or would change once its
+        delimiters are repaired.
+    """
 
     if not isinstance(content, str) or not content:
         return False

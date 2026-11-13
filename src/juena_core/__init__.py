@@ -1,9 +1,8 @@
-"""juena_core — shared agent/server/UI infrastructure extracted from juena-chatbot.
+"""juena_core — shared agent, server and UI building blocks for applications.
 
-See ``00-BOUNDARY.md`` for the disposition table and the boundary decisions
-this package's shape follows from. ``[ui]`` (``juena_core.ui``), ``[mcp]``
-(``juena_core.mcp``), and ``[sandbox]`` (``juena_core.sandbox``) are optional
-extras and are deliberately not imported here.
+``[ui]`` (``juena_core.ui``), ``[mcp]`` (``juena_core.mcp``), and ``[sandbox]``
+(``juena_core.sandbox``) are optional extras and are deliberately not imported
+here.
 """
 
 from __future__ import annotations

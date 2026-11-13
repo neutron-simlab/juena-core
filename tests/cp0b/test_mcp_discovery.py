@@ -1,4 +1,4 @@
-"""CP0b, row 1 and row 6 of the ten-check table.
+"""``MCPAdapter`` tool discovery and structured tool results.
 
 Discovery: ``async with MCPAdapter(target) as adapter: await adapter.list_tools()``
 returns the expected tools. Structured content: a FastMCP tool's

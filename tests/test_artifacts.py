@@ -100,11 +100,11 @@ def test_execution_category_and_workspace_path_survive_restart(tmp_path) -> None
 
 
 def test_execution_records_do_not_consume_the_result_budget(tmp_path) -> None:
-    """The production failure, in one assertion.
+    """A turn full of execution records still has room for its plot.
 
-    A long debugging session writes two records per approved command. Before
-    they were budgeted apart, six commands filled a shared 12-file allowance and
-    the plot that was the point of the turn arrived to find no room.
+    A long debugging session writes two records per approved command. In a
+    shared 12-file allowance, six commands would leave the plot that was the
+    point of the turn no room.
     """
     store = _store(tmp_path)
     for index in range(MAX_RECORD_ARTIFACTS_PER_TURN):
@@ -163,7 +163,7 @@ def test_image_budget_reports_its_reason(tmp_path) -> None:
 
 
 def test_byte_budget_rejects_an_oversized_turn(tmp_path, monkeypatch) -> None:
-    """Bytes are the backstop now that downloadable files are not counted."""
+    """Downloadable files are not counted, so bytes are the backstop."""
     monkeypatch.setattr("juena_core.artifacts.MAX_ARTIFACT_BYTES_PER_TURN", 10)
     store = _store(tmp_path)
     store.register_artifact(
@@ -329,8 +329,8 @@ def _principal(user_id: UUID, name: str) -> Principal:
 def test_artifact_endpoint_enforces_authenticated_owner(tmp_path) -> None:
     """The download route is the only way a stored file leaves the server.
 
-    ``get_artifact`` is a closure inside ``build_api_router`` now, so this
-    drives the real route rather than the function: the store is asked for
+    ``get_artifact`` is a closure inside ``build_api_router``, so this drives
+    the real route rather than the function: the store is asked for
     ``str(user.id)``, and a caller who is not that user must not be able to
     tell an artifact they do not own from one that does not exist.
     """

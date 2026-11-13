@@ -1,5 +1,5 @@
 """The server: identity, the FastAPI factory, the agent registry, streaming,
-chat persistence, interrupts, and the database. See 00-BOUNDARY.md."""
+chat persistence, interrupts, and the database."""
 
 from __future__ import annotations
 

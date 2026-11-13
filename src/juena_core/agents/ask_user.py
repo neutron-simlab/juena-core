@@ -73,6 +73,12 @@ def build_ask_user_tool(asked_by: str) -> BaseTool:
     can use the same path when an application provides it. The answer becomes
     the tool result, so the asking agent keeps everything it had already
     established.
+
+    Args:
+        asked_by: Name of the agent that owns the tool, sent with the question.
+
+    Returns:
+        The ``ask_user`` tool.
     """
 
     def ask_user(question: str, options: list[str] | None = None) -> str:

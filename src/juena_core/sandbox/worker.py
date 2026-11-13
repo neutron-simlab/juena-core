@@ -32,7 +32,14 @@ RESTART_MESSAGE = "Sandbox worker restarted before this job completed"
 
 
 class SandboxWorker:
+    """The sandbox worker: fixed slots that claim and run jobs, plus a cleanup loop."""
+
     def __init__(self, settings: SandboxWorkerSettings) -> None:
+        """Initialize the worker. Nothing connects until :meth:`run`.
+
+        Args:
+            settings: The worker's configuration.
+        """
         self.settings = settings
         self.jobs = SandboxJobs(settings.database_url, concurrency=settings.concurrency)
         self.workspaces = WorkspaceStore(
@@ -43,8 +50,9 @@ class SandboxWorker:
         self.executor = PodmanExecutor(settings, self.workspaces)
 
     def _execute(self, job: SandboxJobRecord) -> None:
+        """Run one claimed job and store its result; only a cleanup failure propagates."""
         try:
-            # Detached research and legacy jobs have no foreground run to stop.
+            # A job without a run_id (detached background work) has no foreground run to stop.
             cancelled = (lambda: self.jobs.get(job.id).cancel_requested) if job.run_id else None
             outcome = self.executor.run(job, cancelled=cancelled)
         except Exception as exc:
@@ -63,6 +71,7 @@ class SandboxWorker:
         )
 
     def _slot(self, stop: threading.Event, fatal: list[BaseException]) -> None:
+        """Claim and run jobs until stopped; a fatal error stops every slot."""
         try:
             while not stop.is_set():
                 job = self.jobs.claim()
@@ -76,6 +85,7 @@ class SandboxWorker:
             stop.set()
 
     def _cleanup(self, stop: threading.Event) -> None:
+        """Fail stale queued jobs often; about hourly, remove old rows and idle workspaces."""
         cycles = 0
         while not stop.wait(CLAIM_DEADLINE_SECONDS):
             try:
@@ -100,6 +110,17 @@ class SandboxWorker:
                 logger.exception("Sandbox cleanup pass failed")
 
     def run(self, stop: threading.Event) -> None:
+        """Start the slots and the cleanup loop, and wait until ``stop`` is set.
+
+        Before starting, it removes leftover containers and fails the jobs a
+        previous worker left active.
+
+        Args:
+            stop: Set it to shut the worker down.
+
+        Raises:
+            RuntimeError: The worker cannot start safely, or a slot failed.
+        """
         self.jobs.open()
         self.executor.connect()
         self.executor.validate_startup()
@@ -134,6 +155,11 @@ class SandboxWorker:
 
 
 def main() -> int:
+    """Run the worker until SIGINT or SIGTERM.
+
+    Returns:
+        The exit code: 1 when another worker already holds the lock, otherwise 0.
+    """
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
     settings = SandboxWorkerSettings.from_env()
     stop = threading.Event()

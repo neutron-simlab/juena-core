@@ -1,4 +1,4 @@
-"""CP2 contracts for shared specialist and supervisor assembly."""
+"""Contracts for shared specialist and supervisor assembly."""
 
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ def _supervisor_stack(**overrides) -> list:
 
 
 def test_a_supervisor_gets_every_filesystem_tool_unless_it_asks_otherwise() -> None:
-    """juena-chatbot's supervisor relies on the default; it must not move."""
+    """Applications' supervisors rely on the default; it must not move."""
 
     names = _filesystem_tool_names(_supervisor_stack())
 
@@ -123,11 +123,11 @@ def test_a_supervisor_gets_every_filesystem_tool_unless_it_asks_otherwise() -> N
 def test_a_supervisor_can_drop_the_tools_its_backend_cannot_serve() -> None:
     """`execute` and `delete` are a dead affordance on a state backend.
 
-    `vitess-ai`'s two agents run VITESS through one trusted MCP gateway. Neither
-    tool can do anything against `SupervisorStateBackend` -- `execute` answers
-    that the backend implements no sandbox protocol -- and `execute` is the tool
-    a weaker model reaches for when it decides to run the binary itself, which
-    is the one thing a single execution path exists to prevent.
+    Neither tool can do anything against `SupervisorStateBackend` -- `execute`
+    answers that the backend implements no sandbox protocol. For an application
+    that runs its program only through one trusted MCP gateway, `execute` is
+    also the tool a weaker model reaches for when it decides to run the program
+    itself, which that single execution path exists to prevent.
     """
 
     names = _filesystem_tool_names(
@@ -180,7 +180,7 @@ def test_specialists_have_no_model_call_cap_and_report_when_tools_run_out(
 def test_a_specialist_gets_every_filesystem_tool_unless_it_asks_otherwise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The default is what juena-chatbot's specialists rely on; it must not move."""
+    """Applications' specialists rely on the default; it must not move."""
 
     names = _filesystem_tool_names(_specialist_stack(monkeypatch))
 
@@ -192,9 +192,8 @@ def test_an_application_can_narrow_a_specialist_to_the_tools_it_needs(
 ) -> None:
     """A specialist whose job is a conversation and one tool call should have two.
 
-    `vitess-ai`'s five module specialists were each being bound eleven tools,
-    `execute` and `delete` among them, which is context spent on tools they will
-    never use and, on a weaker model, an invitation to use them.
+    Every filesystem tool, `execute` and `delete` among them, is context spent
+    on tools it will never use and, on a weaker model, an invitation to use them.
     """
 
     names = _filesystem_tool_names(
@@ -209,10 +208,9 @@ def test_a_specialist_can_have_no_filesystem_at_all(
 ) -> None:
     """`read_file` is mandatory in an allowlist, so `None` is the only way to none.
 
-    `vitess-ai`'s module specialists hand off through a typed state channel, not
-    through `/findings/`. None of them can write a file, so the `read_file` they
-    were left with could never have anything to read -- and the prompt then had
-    to describe a tool that did nothing.
+    A specialist that hands off through a typed state channel, not through
+    `/findings/`, and cannot write a file has nothing for `read_file` to read,
+    and its prompt would have to describe a tool that does nothing.
     """
 
     stack = _specialist_stack(monkeypatch, filesystem_tools=None)
@@ -231,7 +229,7 @@ def test_a_specialist_can_have_no_filesystem_at_all(
 def test_a_bare_string_of_tool_names_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`Sequence[str]` accepted `"read_file"` and bound eight one-letter tools."""
+    """`"read_file"` is a `Sequence[str]` too, and would bind eight one-letter tools."""
 
     with pytest.raises(ValueError, match="not the bare string"):
         _specialist_stack(monkeypatch, filesystem_tools="read_file")

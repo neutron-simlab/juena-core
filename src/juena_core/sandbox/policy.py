@@ -6,7 +6,14 @@ __all__ = ["is_redundant_artifact_export", "requires_execution_approval"]
 
 
 def is_redundant_artifact_export(command: str) -> bool:
-    """Return whether a command tries to print a stored output as base64."""
+    """Return whether a command tries to print a stored output as base64.
+
+    Args:
+        command: The shell command.
+
+    Returns:
+        True when it names ``/workspace/outputs`` and a base64 or data-URI encoding.
+    """
     normalized = " ".join(command.casefold().split())
     if "/workspace/outputs" not in normalized:
         return False
@@ -17,7 +24,14 @@ def is_redundant_artifact_export(command: str) -> bool:
 
 
 def requires_execution_approval(request: object) -> bool:
-    """Skip approval only for exports the backend will refuse without running."""
+    """Skip approval only for exports the backend will refuse without running.
+
+    Args:
+        request: The tool-call request; its ``tool_call`` args hold the command.
+
+    Returns:
+        False only for a redundant artifact export.
+    """
     tool_call = getattr(request, "tool_call", {})
     args = tool_call.get("args", {}) if isinstance(tool_call, dict) else {}
     command = args.get("command", "") if isinstance(args, dict) else ""

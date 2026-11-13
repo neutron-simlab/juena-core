@@ -82,13 +82,12 @@ def test_nothing_is_claimed_while_the_model_is_still_calling_tools(store: Any) -
 
 @pytest.mark.asyncio
 async def test_artifacts_survive_a_run_that_a_budget_cut_short(store: Any) -> None:
-    """The regression that moved this hook from `after_model` to `after_agent`.
+    """Artifacts are attached even when a budget ends the run.
 
     A budget that ends a run returns `jump_to: "end"`, and the graph routes
-    straight past every `after_model` hook. The supervisor has no other
-    `after_agent`, so its exit node was `END` -- and a turn cut short dropped its
-    artifacts silently: the plot was generated, collected, and then attached to
-    nothing. Part 1 makes that path common, so it has to hold.
+    straight past every `after_model` hook, so attaching happens `after_agent`.
+    Otherwise a turn cut short drops its artifacts silently: the plot is
+    generated, collected, and then attached to nothing.
     """
     from langchain.agents import create_agent
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel

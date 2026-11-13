@@ -19,15 +19,22 @@ from langgraph.types import Interrupt, Overwrite
 __all__ = ["is_subagent_namespace", "extract_update_messages", "extract_interrupts", "token_text"]
 
 # With subgraphs=True the namespace of a subagent contains a `tools:`-prefixed
-# segment, because subagents are invoked through the parent's tool node.
-# Verified against a real run: the supervisor streams under `()` and a subagent
-# under `('tools:<task-uuid>',)`. The suffix is a task id, not a readable name,
-# so there is nothing here worth showing the user.
+# segment, because subagents are invoked through the parent's tool node. The
+# supervisor streams under `()` and a subagent under `('tools:<task-uuid>',)`.
+# The suffix is a task id, not a readable name, so there is nothing here worth
+# showing the user.
 _SUBAGENT_NAMESPACE_PREFIX = "tools:"
 
 
 def is_subagent_namespace(node_path: Any) -> bool:
-    """Whether a stream event originated inside a subagent rather than the supervisor."""
+    """Whether a stream event originated inside a subagent rather than the supervisor.
+
+    Args:
+        node_path: The event's namespace; empty for the supervisor.
+
+    Returns:
+        True when any part of the namespace starts with ``tools:``.
+    """
 
     if not node_path:
         return False
@@ -35,7 +42,14 @@ def is_subagent_namespace(node_path: Any) -> bool:
 
 
 def extract_update_messages(event: dict[str, Any]) -> list[BaseMessage]:
-    """Pull the messages out of an ``updates`` event payload."""
+    """Pull the messages out of an ``updates`` event payload.
+
+    Args:
+        event: An ``updates`` event, keyed by node name.
+
+    Returns:
+        The messages from every node, in order; interrupts are skipped.
+    """
 
     new_messages: list[BaseMessage] = []
 
@@ -58,7 +72,14 @@ def extract_update_messages(event: dict[str, Any]) -> list[BaseMessage]:
 
 
 def extract_interrupts(event: dict[str, Any]) -> list[Interrupt]:
-    """Return structured LangGraph interrupts from one updates payload."""
+    """Return structured LangGraph interrupts from one updates payload.
+
+    Args:
+        event: An ``updates`` event.
+
+    Returns:
+        The interrupts listed under ``__interrupt__``.
+    """
 
     updates = (event or {}).get("__interrupt__", ())
     return [item for item in updates if isinstance(item, Interrupt)]
@@ -69,6 +90,13 @@ def token_text(event: tuple[BaseMessage, dict[str, Any]]) -> str | None:
 
     Only ``AIMessageChunk`` carries answer text. ``.text`` yields the text
     blocks alone, so tool-call and reasoning blocks never reach the client.
+
+    Args:
+        event: A ``messages`` event: the message chunk and its metadata.
+
+    Returns:
+        The chunk's text, or None for a chunk that is not an AI chunk, is
+        tagged ``skip_stream``, or has no text.
     """
 
     msg, metadata = event

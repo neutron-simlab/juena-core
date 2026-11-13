@@ -185,11 +185,9 @@ def test_redundant_artifact_export_does_not_request_human_approval() -> None:
 def test_approval_card_reports_the_configured_worker_limits(monkeypatch, tmp_path) -> None:
     """The card must describe what the worker will enforce, not a fixed pair.
 
-    Deliberately *not* the default 2 vCPU / 4 GB: an assertion against the
-    defaults passes whether the card reads the configuration or hardcodes it,
-    and this is the defect that shipped -- the development launcher ran the
-    worker at 1 vCPU / 2 GB while the card promised twice that, because the
-    API was never given the same environment.
+    The limits are deliberately not the default 2 vCPU / 4 GB: an assertion
+    against the defaults passes whether the card reads the configuration or
+    hardcodes it.
     """
 
     monkeypatch.setattr(
@@ -265,7 +263,7 @@ async def test_an_answer_cannot_approve_a_pending_sandbox_command(artifact_store
 
 @pytest.mark.asyncio
 async def test_parallel_commands_pause_and_resume_the_same_specialist(artifact_store) -> None:
-    """Exercise the real HITL payload that used to disappear from the UI."""
+    """Exercise the real human-in-the-loop (HITL) payload, which must reach the UI."""
     import json
 
     from deepagents.backends import StateBackend

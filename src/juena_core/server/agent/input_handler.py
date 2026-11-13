@@ -30,7 +30,14 @@ __all__ = ["AgentRunContext", "AgentInputHandler"]
 
 
 class AgentRunContext(NamedTuple):
-    """The per-run identity of an invocation, independent of its input."""
+    """The per-run identity of an invocation, independent of its input.
+
+    Attributes:
+        config: The LangGraph config for the run, with tracing attached.
+        context: The runtime context passed to the graph.
+        run_id: The id of this run.
+        thread_id: The conversation thread the run belongs to.
+    """
 
     config: RunnableConfig
     context: RuntimeModelContext
@@ -56,9 +63,22 @@ class AgentInputHandler:
         read the thread's existing state *before* the input is known, and that
         read needs the very same config the run will use.
 
-        ``user_id`` is required and must come from an authenticated principal.
-        It scopes the artifact store, the memory namespace and every ownership
-        check, so a missing one is a programming error, not a guest session.
+        Args:
+            thread_id: The conversation thread. None starts a new thread.
+            user_id: The caller's id, from an authenticated principal. It
+                scopes the artifact store, the memory namespace and every
+                ownership check, so a missing one is a programming error, not a
+                guest session.
+            run_id: The id for this run. None generates one.
+            provider: The model provider. None means the configured default.
+            model: The model name. None means the provider's default.
+            control: Handle for steering and stopping the live run, if any.
+
+        Returns:
+            The run's config, runtime context, run id and thread id.
+
+        Raises:
+            ValueError: ``user_id`` is missing.
         """
 
         run_id = run_id or uuid4()
@@ -117,6 +137,18 @@ class AgentInputHandler:
         names ride along in ``additional_kwargs``, which LangChain serialises.
         ``langchain_to_chat_message`` unpacks them for both live streaming and
         history replay.
+
+        Args:
+            user_input: The text the user typed.
+            message_override: Content the model reads instead, such as a
+                staged-input manifest. None means the typed text.
+            initial_files: The update for the graph's ``files`` channel. None
+                leaves the files unchanged.
+            display_attachments: Uploads to record on the message so the
+                transcript can show them.
+
+        Returns:
+            The graph input: one human message and, if given, the file update.
         """
 
         display_kwargs: dict[str, Any] = {}

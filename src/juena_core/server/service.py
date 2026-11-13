@@ -1,33 +1,15 @@
-"""The FastAPI application factory.
+"""Build the FastAPI application: database lifespans, core's routes and ``/health``.
 
-``create_app`` assembles what ``juena/server/service.py`` used to hard-code: the
-lifespans, the two core routers, and ``/health``. Everything an application owns
-— its identity provider, its extra routers, its extra lifespans, its interrupt
-kinds — is passed in.
+An application passes in what it owns: how users sign in, its own routes, its
+own startup work.
 
-**Two side-effect-import traps live in each application's own service module,
-not here**, and both fail late and quietly if forgotten:
+Its ``service.py`` must also import two modules only for what importing them
+does, or it fails later and quietly:
 
-1. *The agent registry.* Transplanted from ``juena/server/service.py:30-35``,
-   which already explains it better than a new comment would:
-
-       Imported for its side effect: the module self-registers the agent
-       factory. Importing *this* module has to be enough, because the process
-       serving the API is not always `main.py` -- production runs
-       `uvicorn juena.server.service:app`, and the deployment plan splits the
-       API and the UI into separate containers. Registering only from
-       `main.py` leaves those processes with an empty registry, so every
-       invocation would 404.
-
-2. *The database models.* A model class never imported is never created by
-   ``create_all``, and it fails at first write rather than at startup.
-
-Both mitigations are the same: import the module in the application's
-``service.py`` with ``# noqa: F401`` and a comment. Core cannot do it — it does
-not know the module names — but it does make the first failure loud:
-:func:`~juena_core.server.agent.registry.get_default_agent` raises when nothing
-registered a default, and ``test_core_owns_exactly_three_tables`` pins the
-second.
+- the agent module, which registers the agent. Import it in ``service.py``, not
+  only in ``main.py``: production starts the API with uvicorn, which never runs
+  ``main.py``, and without the agent every run answers 404.
+- the database models, or their tables are never created.
 
 So an application's ``service.py`` is roughly::
 
@@ -45,6 +27,9 @@ from typing import Any
 
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
+from starlette.datastructures import Headers
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from juena_core.filesystem.service import ConversationFilesystem
 from juena_core.filesystem.api import build_filesystem_router
@@ -80,8 +65,70 @@ __all__ = [
     "ThreadActivity",
     "ThreadWorkspace",
     "StreamPolicy",
+    "BrowserOriginGuard",
     "create_app",
 ]
+
+#: Methods that only read. A foreign page may trigger them: nothing changes,
+#: and CORS keeps that page from seeing the answer.
+_READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+class BrowserOriginGuard:
+    """Refuse a browser request that changes something unless our own page sent it.
+
+    Browsers count every host under one parent domain as the same site, so the
+    session cookie's ``SameSite`` rule does not stop a page on a neighbouring
+    intranet host. The ``Origin`` header does: the browser sets it, and a page
+    cannot forge it.
+
+    A plain ASGI wrapper, not ``@app.middleware("http")``, because that form
+    wraps every response and the streaming routes send their own.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        allowed_origins: Collection[str],
+        exempt_paths: Collection[str] = (),
+    ) -> None:
+        """Initialize the guard around an application.
+
+        Args:
+            app: The application to protect.
+            allowed_origins: Origins whose pages may send a request that
+                changes something.
+            exempt_paths: Exact paths that accept such a request from any
+                origin.
+        """
+        self.app = app
+        self.allowed_origins = frozenset(allowed_origins)
+        self.exempt_paths = frozenset(exempt_paths)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] == "http"
+            and scope["method"] not in _READ_ONLY_METHODS
+            and scope["path"] not in self.exempt_paths
+        ):
+            headers = Headers(scope=scope)
+            origin = headers.get("origin")
+            if origin is not None:
+                foreign = origin not in self.allowed_origins
+            else:
+                # A Python client sends neither header and is let through: it
+                # has no cookie jar a website could borrow. Only a browser
+                # sends Sec-Fetch-Site, and a browser always knows its origin.
+                foreign = "sec-fetch-site" in headers
+            if foreign:
+                refusal = JSONResponse(
+                    {"detail": {"code": "origin_not_allowed", "message": "Browser origin is not allowed"}},
+                    status_code=403,
+                )
+                await refusal(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 def create_app(
@@ -93,6 +140,7 @@ def create_app(
     workspace: ThreadWorkspace | None = None,
     filesystem: ConversationFilesystem | None = None,
     browser_origins: Sequence[str] = (),
+    origin_exempt_paths: Collection[str] = (),
     thread_activity: ThreadActivity | None = None,
     stream_policy: StreamPolicy | None = None,
     closing_note: str = DEFAULT_CLOSING_NOTE,
@@ -118,11 +166,18 @@ def create_app(
         filesystem: Shared persistent conversation files, independent of execution.
         browser_origins: Explicit public UI/API origins allowed credentialed file
             requests and browser saves. Use the shared public origin in production.
+            A browser request that changes something is refused from any other
+            origin (:class:`BrowserOriginGuard`).
+        origin_exempt_paths: Exact paths another website must be able to post
+            to, such as the route an identity provider returns a sign-in to.
+            Such a route must not rely on the session cookie for its authority.
         thread_activity: Guard shared with application routes that write thread data.
         stream_policy: Custom stream event types and silent tools.
         closing_note: Last paragraph of a staged-input manifest.
         allowed_suffixes: Legacy text upload extensions this application accepts.
         upload_policy: Optional text/binary upload policy; mutually exclusive with allowed_suffixes.
+        run_controls: Add routes to read, steer and stop a running reply, and
+            allow only one run per conversation at a time.
         title: Application name, shown in ``/health``.
         version: Application version, shown in ``/health``.
         extra_routers: Routers the application adds — authentication, research,
@@ -133,15 +188,16 @@ def create_app(
             in the order given, so an application's startup work already has a
             pool and a checkpointer.
 
+    Returns:
+        The application, ready to be served by uvicorn.
+
     Raises:
         RuntimeError: A fixed principal is paired with a reachable API. See
             :func:`~juena_core.server.identity.refuse_published_api`.
     """
 
-    # The second of two gates. `local_principal` already refuses at
-    # construction, but an application may build its principal before it
-    # decides how to serve it, and this is the moment the port is about to
-    # open. Both checks are cheap; only this one sees the finished application.
+    # `local_principal` checks this when it is built too. Check again here,
+    # because an application may build its principal before deciding how to serve it.
     refuse_published_api(principal)
     configured_principal = fixed_principal(principal)
 
@@ -151,10 +207,9 @@ def create_app(
 
         async with database_lifespan(), checkpointer_lifespan(), store_lifespan():
             if configured_principal is not None:
-                # A fixed principal has no sign-in to create its `users` row as
-                # a side effect, and `chats.user_id` is a foreign key. Inside
-                # the database lifespan, so the session factory exists; before
-                # serving, so the first conversation cannot lose the race.
+                # A fixed principal never signs in, so nothing else creates its
+                # `users` row, and every chat must point to one. Create it
+                # before the first request arrives.
                 await ensure_principal_row(configured_principal)
             try:
                 async with AsyncExitStack() as stack:
@@ -164,16 +219,9 @@ def create_app(
                         await stack.enter_async_context(extra())
                     yield
             finally:
-                # Agents may hold network clients for the process lifetime;
-                # close them before the pools they may be using go away -- the
-                # pools belong to the database lifespan still open around this.
-                #
-                # **After the extra lifespans have unwound, not before.** An
-                # extra lifespan is application work that may still be *using*
-                # an agent as it stops: juena-chatbot's background research runs
-                # specialists detached from any request, and its shutdown waits
-                # for them. Closing the agents first would pull the clients out
-                # from under work that is still finishing.
+                # Close the agents' network clients after the application's own
+                # shutdown work, which may still be using an agent (background
+                # jobs finishing), but while the database pools are still open.
                 await shutdown_agents()
 
     app = FastAPI(
@@ -193,6 +241,10 @@ def create_app(
             parsed = urlsplit(origin)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc or "*" in origin or parsed.path or parsed.query or parsed.fragment or parsed.username:
                 raise ValueError("browser_origins must contain explicit HTTP origins")
+        # Added before CORS so CORS stays outermost and still answers the
+        # browser's pre-check (an OPTIONS request) itself.
+        app.add_middleware(BrowserOriginGuard, allowed_origins=browser_origins,
+                           exempt_paths=origin_exempt_paths)
         app.add_middleware(CORSMiddleware, allow_origins=list(browser_origins),
                            allow_credentials=True, allow_methods=["GET", "PUT"],
                            allow_headers=["Content-Type"])

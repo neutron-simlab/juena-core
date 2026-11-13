@@ -1,4 +1,4 @@
-"""CP1 schema contracts."""
+"""Schema contracts."""
 
 from __future__ import annotations
 

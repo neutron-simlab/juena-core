@@ -61,6 +61,7 @@ def _graph_run_id(runtime: Any) -> str:
 
 
 def _tool_message(result: Any) -> ToolMessage | None:
+    """Find the ``ToolMessage`` in a tool result, which may be a ``Command`` holding it."""
     if isinstance(result, ToolMessage):
         return result
     update = getattr(result, "update", None)
@@ -83,6 +84,7 @@ class SandboxExecutionMiddleware(AgentMiddleware[SpecialistOutcomeState]):
 
     @staticmethod
     def _command(request: Any) -> str | None:
+        """Return the command of an ``execute`` call, or None for any other tool call."""
         tool_call = request.tool_call
         if not isinstance(tool_call, dict) or tool_call.get("name") != "execute":
             return None
@@ -121,6 +123,7 @@ class SandboxExecutionMiddleware(AgentMiddleware[SpecialistOutcomeState]):
 
     @staticmethod
     def _after(record: tuple[str, str, str | None, str], result: Any) -> None:
+        """Store the command's output as a record and audit the approved run."""
         user_id, thread_id, run_id, command = record
         text = _result_text(result)
         store = get_artifact_store()
@@ -154,6 +157,7 @@ class SandboxExecutionMiddleware(AgentMiddleware[SpecialistOutcomeState]):
         graph_run_id: str,
         events: list[ExecutionEvidence],
     ) -> Command:
+        """Return the tool result as a ``Command`` that also carries the execution evidence."""
         message = _tool_message(result)
         if not events:
             events = [
@@ -183,6 +187,19 @@ class SandboxExecutionMiddleware(AgentMiddleware[SpecialistOutcomeState]):
         request: Any,
         handler: Callable[[Any], Any],
     ) -> Any:
+        """Run an ``execute`` call and capture its evidence; pass other tools through.
+
+        Args:
+            request: The tool-call request.
+            handler: Runs the tool call.
+
+        Returns:
+            The handler's result, or for ``execute`` a ``Command`` that adds the
+            execution evidence to the state.
+
+        Raises:
+            RuntimeError: An ``execute`` call has no graph run id.
+        """
         command = self._command(request)
         if command is None:
             return handler(request)
@@ -200,6 +217,19 @@ class SandboxExecutionMiddleware(AgentMiddleware[SpecialistOutcomeState]):
         request: Any,
         handler: Callable[[Any], Awaitable[Any]],
     ) -> Any:
+        """Async form of :meth:`wrap_tool_call`.
+
+        Args:
+            request: The tool-call request.
+            handler: Runs the tool call.
+
+        Returns:
+            The handler's result, or for ``execute`` a ``Command`` that adds the
+            execution evidence to the state.
+
+        Raises:
+            RuntimeError: An ``execute`` call has no graph run id.
+        """
         command = self._command(request)
         if command is None:
             return await handler(request)

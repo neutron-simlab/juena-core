@@ -44,6 +44,17 @@ def _browser_path(path: str) -> str:
 
 def build_filesystem_router(principal: PrincipalDependency, filesystem: ConversationFilesystem,
                             *, browser_origins: tuple[str, ...] = ()) -> APIRouter:
+    """Build the routes that let a user browse, download and edit a conversation's files.
+
+    Args:
+        principal: Dependency that resolves the signed-in user.
+        filesystem: The conversation filesystem the routes serve.
+        browser_origins: Public origins a browser may save files from; a save
+            with any other ``Origin`` is refused.
+
+    Returns:
+        The router, under ``/threads/{thread_id}/filesystem``.
+    """
     router = APIRouter(prefix="/threads/{thread_id}/filesystem", tags=["filesystem"])
 
     @asynccontextmanager

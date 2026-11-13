@@ -45,17 +45,15 @@ class BlabladorModelName(StrEnum):
     DEEPSEEK_V41_FLASH_HZDR = "deepseek-v4.1-flash-at-hzdr"
 
 
-# Measured from the provider's /v1/models endpoint; the selected Qwen entry was
-# refreshed on 2026-09-23. LangChain has no profile entry for
-# these custom identifiers.
+# Context window per model, as the provider's /v1/models endpoint reports it.
+# LangChain has no profile entry for these custom identifiers.
 BLABLADOR_MAX_MODEL_LEN: dict[str, int] = {
-    # JUWELS /v1/models reports 940k, not 1M (verified 2026-10-13).
+    # JUWELS /v1/models reports 940k, not 1M.
     BlabladorModelName.QWEN38_FLASH_NEXT_JUWELS.value: 940_000,
     BlabladorModelName.GPT_OSS.value: 131_072,
-    # Verified on /v1/models on 2026-10-15.
     BlabladorModelName.DEEPSEEK_V41_FLASH_JUWELS.value: 1_048_576,
-    # /v1/models reports no length for it; a 900,043-token prompt was accepted
-    # on 2026-10-18, so this is a verified lower bound.
+    # /v1/models reports no length for it; a 900,043-token prompt was
+    # accepted, so this is a verified lower bound.
     BlabladorModelName.DEEPSEEK_V41_FLASH_HZDR.value: 900_000,
 }
 
@@ -66,16 +64,23 @@ BLABLADOR_MODEL_DISPLAY_NAMES: dict[str, str] = {
     BlabladorModelName.DEEPSEEK_V41_FLASH_HZDR.value: "DeepSeek-V4.1-Flash (HZDR)",
 }
 
-# BlaBlaDor answers 429 after about 30 requests a minute to these models
-# (measured 2026-10-17; other models were unaffected), so clients pace
-# their requests below that.
+# BlaBlaDor answers 429 (too many requests) after about 30 requests a minute
+# to these models (other models were unaffected), so clients pace their
+# requests below that.
 BLABLADOR_REQUESTS_PER_SECOND: dict[str, float] = {
     BlabladorModelName.DEEPSEEK_V41_FLASH_HZDR.value: 0.45,
 }
 
 
 def get_blablador_model_display_name(model_id: str) -> str:
-    """Return the UI label for a Blablador model identifier."""
+    """Return the UI label for a Blablador model identifier.
+
+    Args:
+        model_id: The model identifier.
+
+    Returns:
+        The label, or ``model_id`` itself when it has none.
+    """
 
     return BLABLADOR_MODEL_DISPLAY_NAMES.get(model_id, model_id)
 
@@ -89,13 +94,27 @@ PROVIDER_MODELS: dict[Provider, list[str]] = {
 
 
 def get_models_for_provider(provider: Provider) -> list[str]:
-    """Return the models offered for *provider*."""
+    """Return the models offered for *provider*.
+
+    Args:
+        provider: The provider.
+
+    Returns:
+        Its model identifiers, or an empty list.
+    """
 
     return PROVIDER_MODELS.get(provider, [])
 
 
 def get_default_model_for_provider(provider: Provider) -> str:
-    """Return the built-in default model for *provider*."""
+    """Return the built-in default model for *provider*.
+
+    Args:
+        provider: The provider.
+
+    Returns:
+        The default model identifier, or ``""`` for an unknown provider.
+    """
 
     defaults = {
         Provider.OPENAI: OpenAIModelName.GPT_4O_MINI.value,

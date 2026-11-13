@@ -19,7 +19,29 @@ _ACTIVE_JOB_PREDICATE = text(
 
 
 class SandboxJob(Base):
-    """Durable metadata shared by the API and the rootless-Podman worker."""
+    """Durable metadata shared by the API and the rootless-Podman worker.
+
+    Partial unique indexes allow one queued or running job per tenant and per
+    workspace at a time.
+
+    Attributes:
+        id: The job's id.
+        tenant_id: The hashed id of the user who owns the workspace.
+        workspace_id: The hashed id of the conversation's workspace.
+        command: The shell command.
+        run_id: The run that submitted it, so stopping the run can cancel it.
+        cancel_requested: Whether stopping the run asked to cancel it.
+        timeout_seconds: The longest the command may run.
+        max_output_bytes: How much of its output is kept.
+        status: ``queued``, ``running``, or one of the terminal statuses.
+        output: The command's output, or the reason it failed.
+        exit_code: The command's exit code, if it has one.
+        truncated: Whether the output was cut at ``max_output_bytes``.
+        artifact_names: The output files accepted for delivery.
+        created_at: When the job was queued.
+        started_at: When a worker slot claimed it.
+        finished_at: When it reached a terminal status.
+    """
 
     __tablename__ = "sandbox_jobs"
     __table_args__ = (

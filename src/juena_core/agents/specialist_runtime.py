@@ -126,7 +126,18 @@ class PromptResourceError(RuntimeError):
 
 
 def load_markdown(package: str, filename: str) -> str:
-    """Load one required Markdown resource and fail loudly when packaging is broken."""
+    """Load one required Markdown resource and fail loudly when packaging is broken.
+
+    Args:
+        package: Package that ships the file.
+        filename: File name inside the package.
+
+    Returns:
+        The text, ending in exactly one newline.
+
+    Raises:
+        PromptResourceError: The file is missing, unreadable or empty.
+    """
 
     try:
         text = resources.files(package).joinpath(filename).read_text(encoding="utf-8")
@@ -170,7 +181,14 @@ def _valid_skill_file(skill_file: Path) -> bool:
 
 
 def has_authored_skills(skills_dir: Path | None) -> bool:
-    """Return whether a specialist owns at least one valid `SKILL.md`."""
+    """Return whether a specialist owns at least one valid `SKILL.md`.
+
+    Args:
+        skills_dir: Directory with one subdirectory per skill, or ``None``.
+
+    Returns:
+        Whether any subdirectory holds a `SKILL.md` that passes validation.
+    """
 
     if skills_dir is None or not skills_dir.is_dir():
         return False
@@ -186,7 +204,18 @@ def build_specialist_backend(
     skills_dir: Path | None = None,
     workspace_writable: bool = False,
 ) -> CompositeBackend:
-    """Build isolated staged-input, repository, and optional skill routes."""
+    """Build isolated staged-input, repository, and optional skill routes.
+
+    Args:
+        repo_cache_root: Directory served read-only at ``/repos/``; ``None``
+            mounts no repositories.
+        skills_dir: Directory served read-only at ``/skills/`` when it holds a
+            valid skill.
+        workspace_writable: Whether the specialist may write to ``/workspace/``.
+
+    Returns:
+        The specialist's composite backend.
+    """
 
     routes: dict[str, Any] = {FINDINGS_PREFIX: FindingsStateBackend()}
     from juena_core.filesystem.service import get_filesystem
@@ -223,6 +252,15 @@ def resilience_middleware(
 
     ``model_call_limit=None`` leaves the number of model calls open; the tool
     budget still bounds the run.
+
+    Args:
+        fallback_models: Models to try, in order, when the primary fails.
+        model_call_limit: Model calls allowed per invocation, or ``None``.
+        tool_call_limit: Tool calls allowed per invocation.
+        ask_user_bound: Whether to cap ``ask_user`` calls as well.
+
+    Returns:
+        The middleware, outermost first.
     """
 
     middleware: list[Any] = []
@@ -260,6 +298,13 @@ def build_fallback_models(
     Applications with a deliberate model order pass explicit ``(provider,
     model)`` pairs. Callers that omit them retain the provider-level fallback
     configured in :class:`CoreSettings`.
+
+    Args:
+        model_specs: ``(provider, model)`` pairs in fallback order; ``None``
+            means the default model of ``FALLBACK_PROVIDER``.
+
+    Returns:
+        Streaming chat models for the pairs whose provider is configured.
     """
 
     if model_specs is None:
@@ -310,23 +355,46 @@ def build_specialist_middleware(
     Unattended specialists receive neither that pair nor `ask_user`.
 
     `filesystem_tools` narrows what `FilesystemMiddleware` exposes. It defaults
-    to every tool the backend supports -- eight of them, including `execute`
-    and `delete` -- which is right for a research specialist that works in a
-    workspace and wrong for one whose whole job is a conversation and a single
-    validation call. A specialist bound to ten tools it will never use spends
-    context on them and, on a weaker model, reaches for them. `read_file` is
-    required in any allowlist by the middleware itself, so `None` -- mount no
-    filesystem middleware at all -- is the only way to bind none of them. That
-    is the right answer for a specialist whose hand-off is a typed state
-    channel rather than a `/findings/` file: with no `write_file` anywhere in
-    the agent, `read_file` has nothing to read, and a tool bound to read
-    something that is never written is a claim the prompt then has to explain
-    away.
+    to every tool the backend supports (eight, including `execute` and
+    `delete`): right for a research specialist that works in a workspace,
+    wrong for one whose whole job is a conversation and a single validation
+    call. A specialist given tools it will never use spends context on them
+    and, on a weaker model, reaches for them. The middleware requires
+    `read_file` in any list, so `None` (no filesystem middleware at all) is the
+    only way to give none. Use it for a specialist that hands off through a
+    typed state channel rather than a `/findings/` file: with no `write_file`
+    anywhere in the agent, `read_file` has nothing to read.
 
-    A bare string is rejected rather than accepted as a sequence of characters.
-    `Sequence[str]` admitted `"read_file"` by its type and turned it into
-    `['r', 'e', 'a', 'd', ...]`, which the middleware would then reject with a
-    message about a tool named `r`.
+    A bare string is rejected: `"read_file"` would otherwise be read as the
+    tool names `r`, `e`, `a`, `d`, ...
+
+    Args:
+        backend: The specialist's backend, usually from
+            :func:`build_specialist_backend`.
+        summarizer_model: Model that summarizes the conversation when it grows
+            too long.
+        fallback_models: Models to try, in order, when the primary fails.
+        filesystem_tool_descriptions: Tool name mapped to the description the
+            model sees.
+        specialist_name: Name used in the report and in steering.
+        skills_dir: The specialist's skills directory, or ``None``.
+        skills_label: Label for the specialist's skill source.
+        filesystem_tools: Tool names to expose, ``"all"``, or ``None`` for no
+            filesystem tools.
+        execution_middleware: Middleware that runs commands; requires
+            ``interrupt_on``.
+        interrupt_on: Which tool calls need the user's approval; requires
+            ``execution_middleware``.
+        unattended: Whether the run is a background job with nobody to ask.
+
+    Returns:
+        The middleware, outermost first.
+
+    Raises:
+        ValueError: ``filesystem_tools`` is a bare string other than
+            ``"all"``, only one of ``execution_middleware`` and
+            ``interrupt_on`` is given, or an unattended specialist is given an
+            execution backend.
     """
 
     if isinstance(filesystem_tools, str) and filesystem_tools != "all":
@@ -403,22 +471,39 @@ def build_supervisor_middleware(
 ) -> list[Any]:
     """Return the canonical supervisor middleware stack.
 
-    `extra` is the sole splice point. It sits after
-    `PatchToolCallsMiddleware` and before `RuntimeModelMiddleware`, preserving
-    the established nesting order while letting an application add genuinely
-    application-owned cross-cutting behavior.
+    `extra` is the only place an application adds its own middleware. It sits
+    after `PatchToolCallsMiddleware` and before `RuntimeModelMiddleware`, so
+    the rest of the nesting order stays fixed.
 
-    `filesystem_tools` narrows what `FilesystemMiddleware` exposes, for the same
-    reason it exists on `build_specialist_middleware` and with the same default
-    of every tool the backend supports. The difference here is which supervisor
-    is asking. One that works in a workspace wants all eight. One whose only way
-    to run anything is a single trusted gateway wants neither `execute` nor
-    `delete`: they cannot work against a `SupervisorStateBackend`, so they are a
-    dead affordance -- and `execute` is the exact tool a weaker model reaches for
-    when it decides to run the domain binary itself, which is the one thing a
-    single execution path exists to prevent. Unlike the specialist version there
-    is no `None`: a supervisor without `read_file` could not read the findings
-    its own specialists write.
+    `filesystem_tools` narrows what `FilesystemMiddleware` exposes, as on
+    `build_specialist_middleware`, with the same default. A supervisor that
+    works in a workspace wants all eight tools. One whose only way to run
+    anything is a single trusted gateway wants neither `execute` nor `delete`:
+    they cannot work against a `SupervisorStateBackend`, and `execute` is the
+    tool a weaker model reaches for when it decides to run the domain binary
+    itself, which that single gateway exists to prevent. There is no `None`
+    here: a supervisor without `read_file` could not read the findings its own
+    specialists write.
+
+    Args:
+        backend: The supervisor's backend, usually from
+            :func:`~juena_core.agents.backends.build_supervisor_backend`.
+        summarizer_model: Model that summarizes the conversation when it grows
+            too long.
+        fallback_models: Models to try, in order, when the primary fails.
+        subagents: Specialist specs to delegate to.
+        task_description: Description of the `task` tool the model sees.
+        extra: The application's own middleware.
+        memory_system_prompt: Prompt that wraps the user's saved memory.
+        model_call_limit: Model calls allowed per invocation.
+        tool_call_limit: Tool calls allowed per invocation.
+        filesystem_tools: Tool names to expose, or ``"all"``.
+
+    Returns:
+        The middleware, outermost first.
+
+    Raises:
+        ValueError: ``filesystem_tools`` is a bare string other than ``"all"``.
     """
 
     if isinstance(filesystem_tools, str) and filesystem_tools != "all":

@@ -2,7 +2,7 @@
 
 One turn's uploads become files under ``/inputs/uploads/`` in the graph's file
 state, plus a manifest the model is told to read. Nothing here knows how those
-files reach a shell or a simulation binary: that is the application's
+files reach a shell or another program: that is the application's
 ``ThreadWorkspace``, and it reads :attr:`PreparedCodeChatInputs.workspace_files`.
 """
 
@@ -63,7 +63,15 @@ _UPLOAD_CHUNK_BYTES = 64 * 1024
 
 
 def sanitize_uploaded_filename(filename: str | None) -> str:
-    """Return a safe leaf filename for staging under ``/inputs/uploads``."""
+    """Return a safe leaf filename for staging under ``/inputs/uploads``.
+
+    Args:
+        filename: The name the client sent, if any.
+
+    Returns:
+        The last part of the name with unsafe characters replaced by ``_``, or
+        ``upload.txt`` when nothing usable is left.
+    """
 
     original = Path(filename or "upload.txt").name
     if original in {"", ".", ".."}:
@@ -124,9 +132,9 @@ async def _read_upload_bounded(
 
 
 def _decode_upload_text(raw: bytes, filename: str) -> str:
-    # Strict decoding is what actually distinguishes text from binary. Decoding
-    # with errors="replace" and then rejecting U+FFFD also rejected legitimate
-    # UTF-8 files that genuinely contain a replacement character.
+    # Strict decoding is what tells text from binary. Decoding with
+    # errors="replace" and rejecting U+FFFD instead would also reject valid
+    # UTF-8 files that contain a replacement character.
     #
     # "utf-8-sig" strips a byte-order mark a Windows editor may have written.
     try:
@@ -150,8 +158,27 @@ async def normalize_uploaded_attachments(
 ) -> tuple[list[UploadedAttachment], dict[str, Any]]:
     """Validate a complete batch before publishing text state or workspace bytes.
 
-    ``allowed_suffixes`` retains the legacy application-specific text override.
     Binary uploads are opt-in and never enter graph file state.
+
+    Args:
+        attachments: The uploaded files. All are closed before this returns.
+        existing_upload_paths: Upload paths already staged on the thread, so
+            new names do not collide with them.
+        allowed_suffixes: The older, text-only way to set accepted extensions;
+            pass it or ``upload_policy``, not both.
+        preserve_bytes: Keep text exactly as uploaded, including a byte-order
+            mark.
+        upload_policy: Which text and binary uploads are accepted, and their
+            size limits.
+        thread_files: The thread's persistent files. When given, uploads are
+            written there instead of into graph state.
+
+    Returns:
+        The accepted attachments, and the graph file-state update for them.
+
+    Raises:
+        ValueError: The batch is refused: by the upload policy, for its size,
+            for text that is not valid UTF-8, or for an invalid TIFF header.
     """
 
     uploads = list(attachments or [])
@@ -221,7 +248,16 @@ async def get_existing_input_files(
     agent: CompiledStateGraph,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Return the current staged ``/inputs`` files for the active thread."""
+    """Return the current staged ``/inputs`` files for the active thread.
+
+    Args:
+        agent: The compiled graph.
+        config: The run's config, naming the thread.
+
+    Returns:
+        The thread's files under ``/inputs``, or an empty dict when the state
+        cannot be read.
+    """
 
     try:
         state: Any = await agent.aget_state(config=config)
@@ -249,7 +285,26 @@ async def prepare_code_chat_turn_inputs(
     thread_files: ThreadFiles | None = None,
     upload_policy: UploadPolicy | None = None,
 ) -> PreparedCodeChatInputs | None:
-    """Prepare staged ``/inputs`` files and a manifest for one chat turn."""
+    """Prepare staged ``/inputs`` files and a manifest for one chat turn.
+
+    Args:
+        agent: The compiled graph.
+        config: The run's config, naming the thread.
+        message: The text the user typed.
+        attachments: Files uploaded with this turn.
+        closing_note: Last paragraph of the manifest.
+        allowed_suffixes: The older, text-only way to set accepted extensions.
+        thread_files: The thread's persistent files, if the application has
+            them.
+        upload_policy: Which uploads are accepted, and their size limits.
+
+    Returns:
+        The message override and file updates for this turn, or None when the
+        turn has nothing to stage or clear.
+
+    Raises:
+        ValueError: An upload is refused.
+    """
 
     existing_files = await get_existing_input_files(agent, config)
     existing_upload_paths = sorted(
@@ -309,11 +364,10 @@ async def prepare_code_chat_turn_inputs(
                 pasted_context.error_text
             )
 
-    # Materialise exactly the state update the graph is about to receive. This
-    # has to happen after the manifest and turn-scoped helper files are added;
-    # computing it earlier leaves a process-backed workspace with only the raw
-    # upload even though the graph can also see current_message, extracted code
-    # or errors, and the upload manifest.
+    # Materialise exactly the state update the graph is about to receive, so
+    # this comes after the manifest and turn helper files are added. Computed
+    # earlier, a workspace read by a separate process would get only the raw
+    # upload.
     workspace_files = dict(existing_files)
     for path, file_data in files_update.items():
         if file_data is None:

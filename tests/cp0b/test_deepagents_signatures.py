@@ -1,14 +1,12 @@
-"""CP0b, row 9: ``create_deep_agent(...)`` accepts the kwargs 03/CP5 passes
-(``name``, ``model``, ``tools``, ``middleware``, ``subagents``, ``backend``,
-``checkpointer``, ``system_prompt`` — read from
-``vitess_ai/agents/advanced_mode/agent.py``), and a subagent dict's
-``middleware`` key still runs during delegation.
+"""``create_deep_agent(...)`` accepts the keyword arguments an application
+passes (``name``, ``model``, ``tools``, ``middleware``, ``subagents``,
+``backend``, ``checkpointer``, ``system_prompt``), and a subagent dict's
+``middleware`` key runs during delegation.
 
-This is a full run, not just a signature inspection: the top-level model is
-scripted to call the ``task`` tool deepagents exposes for delegation, and the
-test asserts the subagent's own middleware actually executed — a version
-bump changing how subagents are wired would show up as the marker never
-being set, not as an import error.
+This is a full run, not a signature check: the top-level model is scripted to
+call the ``task`` tool deepagents provides for delegation, and the test asserts
+the subagent's own middleware ran. A release that changes how subagents are
+wired shows up as the marker never being set, not as an import error.
 """
 
 import pytest

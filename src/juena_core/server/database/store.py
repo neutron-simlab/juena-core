@@ -18,6 +18,15 @@ _store: AsyncPostgresStore | None = None
 
 
 def get_store() -> AsyncPostgresStore:
+    """Return the Store opened by :func:`store_lifespan`.
+
+    Returns:
+        The shared Postgres Store.
+
+    Raises:
+        RuntimeError: The lifespan has not started.
+    """
+
     if _store is None:
         raise RuntimeError("Postgres Store is not initialized")
     return _store
@@ -28,6 +37,9 @@ async def store_lifespan() -> AsyncGenerator[AsyncPostgresStore, None]:
     """Expose the Store backing Deep Agents' per-user memory files.
 
     Shares the psycopg pool opened by ``database_lifespan``.
+
+    Yields:
+        The Store, with its tables created.
     """
 
     global _store

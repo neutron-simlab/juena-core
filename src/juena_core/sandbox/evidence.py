@@ -21,7 +21,14 @@ _capture: ContextVar[_Capture | None] = ContextVar(
 
 @contextmanager
 def capture_sandbox_execution(graph_run_id: str) -> Iterator[list[ExecutionEvidence]]:
-    """Capture backend evidence produced by one direct execute tool call."""
+    """Capture backend evidence produced by one direct execute tool call.
+
+    Args:
+        graph_run_id: The run id stamped on every captured record.
+
+    Yields:
+        The list that records are appended to while the block runs.
+    """
 
     events: list[ExecutionEvidence] = []
     token = _capture.set((graph_run_id, events))
@@ -32,7 +39,11 @@ def capture_sandbox_execution(graph_run_id: str) -> Iterator[list[ExecutionEvide
 
 
 def record_sandbox_execution(**values: Any) -> None:
-    """Append evidence only while execution middleware owns a capture."""
+    """Append evidence only while execution middleware owns a capture.
+
+    Args:
+        **values: The ``ExecutionEvidence`` fields other than ``graph_run_id``.
+    """
 
     active = _capture.get()
     if active is None:

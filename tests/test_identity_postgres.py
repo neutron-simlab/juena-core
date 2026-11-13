@@ -1,4 +1,4 @@
-"""CP3 persistence and identity, against a real Postgres.
+"""Persistence and identity, against a real Postgres.
 
 Requires the throwaway database:
 ``docker compose -f tests/compose.postgres.yml up -d --wait``
@@ -126,7 +126,7 @@ async def _principal(session, *, subject: str = "subject-1") -> Principal:
 
 @pytest.mark.asyncio
 async def test_renamed_attributes_keep_their_original_columns(database) -> None:
-    """``create_all`` never renames a column, so the attributes moved instead."""
+    """``create_all`` never renames a column, so renamed attributes map to existing ones."""
 
     async with database.connect() as connection:
         columns = await connection.run_sync(
@@ -172,6 +172,37 @@ async def test_session_round_trip_and_revocation(db_session) -> None:
     with pytest.raises(Exception) as excinfo:
         await session_principal(session_token=token, session=db_session)
     assert excinfo.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_signing_in_removes_expired_sessions(db_session) -> None:
+    """Nothing else deletes a session row, so without this the table only grows."""
+
+    principal = await _principal(db_session)
+    expired = await create_auth_session(db_session, principal)
+    live = await create_auth_session(db_session, principal)
+    await db_session.execute(
+        text("UPDATE auth_sessions SET expires_at = now() - interval '1 minute' WHERE token_hash = :hash"),
+        {"hash": hash_session_token(expired)},
+    )
+    await db_session.commit()
+
+    newest = await create_auth_session(db_session, principal)
+    await db_session.commit()
+
+    stored = await db_session.execute(text("SELECT token_hash FROM auth_sessions"))
+    assert set(stored.scalars()) == {hash_session_token(live), hash_session_token(newest)}
+
+
+@pytest.mark.asyncio
+async def test_a_reserved_thread_id_cannot_become_a_conversation(db_session) -> None:
+    principal = await _principal(db_session)
+
+    with pytest.raises(ChatNotFoundError):
+        await ensure_owned_chat(db_session, principal.id, "research:job-1", "simulator")
+
+    stored = await db_session.execute(text("SELECT count(*) FROM chats"))
+    assert stored.scalar_one() == 0
 
 
 @pytest.mark.asyncio
@@ -235,7 +266,7 @@ async def test_listing_separates_the_agents(db_session) -> None:
 
 @pytest.mark.asyncio
 async def test_local_principal_can_own_a_conversation_after_row_upsert(database) -> None:
-    """CP3 proves the primitive; CP4 wires it into application startup."""
+    """The upsert alone; ``test_server_routes_postgres.py`` covers it at startup."""
 
     user_id = uuid4()
     dependency = local_principal(user_id=user_id, display_name="Local User")

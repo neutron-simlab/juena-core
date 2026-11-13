@@ -24,6 +24,15 @@ def build_settings(environ: Mapping[str, str] | None = None) -> CoreSettings:
     Binding and publication are intentionally not configurable: this example
     uses one fixed local identity and must remain reachable only on loopback.
     Replace the principal in ``service.py`` before publishing a derived app.
+
+    Args:
+        environ: The variables to read. None means ``os.environ``.
+
+    Returns:
+        The settings to pass to ``juena_core.configure``.
+
+    Raises:
+        RuntimeError: ``DEMO_PROVIDER`` names no known provider.
     """
 
     env = os.environ if environ is None else environ

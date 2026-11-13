@@ -36,10 +36,9 @@ def _processor(**kwargs: Any) -> StreamEventProcessor:
 def sandbox_kind(monkeypatch, tmp_path):
     """Register core's optional sandbox approval kind for one test.
 
-    Core's processor knows no interrupt kind but the clarification. juena-chatbot
-    used to have the sandbox kind registered as a side effect of importing its
-    own package; here it is asked for explicitly, and the limits are set to
-    something other than the defaults so that the card is shown reading them.
+    Core's processor knows no interrupt kind but the clarification, so the
+    sandbox kind is registered explicitly. The limits differ from the defaults
+    so that the card is shown reading them.
     """
 
     monkeypatch.setattr(
@@ -139,8 +138,8 @@ def test_token_text_returns_only_text_blocks() -> None:
 
 @pytest.mark.asyncio
 async def test_subagent_tokens_never_reach_the_answer_stream() -> None:
-    """Subagent tokens are internal reasoning. Streaming them made the UI show
-    text that was then replaced by the supervisor's real answer."""
+    """Subagent tokens are internal reasoning. Streaming them would make the UI
+    show text that is then replaced by the supervisor's real answer."""
     payloads = await _collect(
         _processor(),
         (("tools:abc",), "messages", (AIMessageChunk(content="thinking out loud"), {})),
@@ -662,11 +661,11 @@ async def test_a_real_turn_lists_each_step_and_how_it_ended() -> None:
 
 @pytest.mark.asyncio
 async def test_summarization_deletions_are_not_shown_as_an_error() -> None:
-    """`RemoveMessage` trims state; rendering it sent the user an error event.
+    """`RemoveMessage` trims state; rendering it would send the user an error event.
 
     It arrives in the same `updates` stream as real turns once a conversation is
-    long enough to summarize, so the user saw "Failed to process message" in
-    place of their answer.
+    long enough to summarize, so the user would see "Failed to process message"
+    in place of their answer.
     """
     from langchain_core.messages import RemoveMessage
 

@@ -26,7 +26,16 @@ async def build_demo_agent(
     provider: str,
     model: str,
 ) -> tuple[Any, CompiledStateGraph]:
-    """Build the graph on its first request, inside the server lifespan."""
+    """Build the demo agent's graph on its first request, inside the server lifespan.
+
+    Args:
+        provider: The provider that serves the chat model.
+        model: The default chat model's name.
+
+    Returns:
+        A holder for process-lifetime resources (the demo has none) and the
+        compiled agent graph.
+    """
 
     default_model = build_chat_model(
         provider=provider,

@@ -1,18 +1,9 @@
 """Rendering for the message types core's stream produces.
 
-Split out of ``juena-chatbot/app/ui_components.py`` (00-BOUNDARY.md,
-decision 7). What moved is everything that renders a ``ChatMessage``, an
-artifact or a streamed token — shapes core's server defines, so core is the
-one place that has to agree with it.
-
-What stayed behind is everything that says which product this is:
-``logo_data_uri``, ``render_header_with_logo`` and ``render_chat_input_styles``
-with their asset path and CSS. A logo is domain, not wiring.
-
-**Artifacts are drawn once per script run.** One file can reach the page from
-both the stored transcript and the live stream, and Streamlit treats a
-repeated widget key as a fatal error rather than absorbing it, so
-:func:`reset_rendered_artifacts` must be called at the top of every run.
+Artifacts are drawn once per script run. One file can reach the page from both
+the stored transcript and the live stream, and Streamlit treats a repeated
+widget key as a fatal error, so :func:`reset_rendered_artifacts` must be called
+at the top of every run.
 """
 
 from __future__ import annotations
@@ -89,6 +80,13 @@ def sanitize_assistant_content(content: Any) -> Any:
     model writes inline is dead: an older turn may carry a very large Base64
     data URI, which is slow to send and renders broken, and a turn whose file
     was never delivered may carry an invented ``sandbox:`` path.
+
+    Args:
+        content: Message content. Anything but a string is returned unchanged.
+
+    Returns:
+        The content without unrenderable images, and with ``sandbox:`` and
+        ``file:`` links reduced to their text.
     """
     if not isinstance(content, str):
         return content
@@ -112,8 +110,8 @@ def sanitize_assistant_content(content: Any) -> Any:
         cleaned = cleaned[:start] + cleaned[end:]
         search_from = start
 
-    # The scan above stays because it handles unterminated multi-megabyte blobs,
-    # which a regex bounded to one line cannot match.
+    # The scan above handles unterminated multi-megabyte blobs, which a regex
+    # bounded to one line cannot match.
     cleaned = _UNRENDERABLE_IMAGE_RE.sub("", cleaned)
     cleaned = _DEAD_SCHEME_LINK_RE.sub(r"\1", cleaned)
 
@@ -121,7 +119,11 @@ def sanitize_assistant_content(content: Any) -> Any:
 
 
 def render_content(content: Any) -> None:
-    """Render message content uniformly, as JSON or as markdown."""
+    """Render message content uniformly, as JSON or as markdown.
+
+    Args:
+        content: A dict or list, a JSON string, or markdown. Blank text draws nothing.
+    """
     if isinstance(content, (dict, list)):
         st.json(content)
     else:
@@ -135,7 +137,14 @@ def render_content(content: Any) -> None:
 
 
 def should_collapse_tool_payload(custom_data: dict[str, Any] | None) -> bool:
-    """Return True when tool payloads should render inside an expander."""
+    """Return True when tool payloads should render inside an expander.
+
+    Args:
+        custom_data: The tool message's custom data, or None.
+
+    Returns:
+        True unless ``display_mode`` is ``inline``.
+    """
     custom_data = custom_data or {}
     display_mode = str(custom_data.get("display_mode", "")).strip().lower()
     if display_mode == "inline":
@@ -217,7 +226,14 @@ def _claim_artifact_key(artifact: dict[str, Any], filename: str) -> str | None:
 
 
 def render_artifacts(custom_data: dict[str, Any] | None) -> None:
-    """Render plots and records; ordinary downloads belong in a mounted explorer."""
+    """Render plots and records; ordinary downloads belong in a mounted explorer.
+
+    When no Files panel is mounted, other files get download buttons here too.
+    Grouped files, and several ungrouped downloads, go in collapsed sections.
+
+    Args:
+        custom_data: A message's custom data; its ``artifacts`` list is drawn.
+    """
     artifacts = (custom_data or {}).get("artifacts") or []
     if not isinstance(artifacts, list):
         return
@@ -327,7 +343,13 @@ def finalize_streaming_message(
     content: Any,
     custom_data: dict[str, Any] | None = None,
 ) -> None:
-    """Render the final AI message using the same content renderer as history."""
+    """Render the final AI message using the same content renderer as history.
+
+    Args:
+        message_placeholder: The page slot the answer is drawn into.
+        content: The answer's content.
+        custom_data: The message's custom data, for its artifacts.
+    """
     with message_placeholder.container():
         if content:
             render_content(sanitize_assistant_content(content))
@@ -340,6 +362,9 @@ def render_attachment_chips(custom_data: dict[str, Any] | None) -> None:
     The server records the same ``attachments`` key on the staged human message,
     so a reloaded chat shows the uploads it was sent with instead of losing every
     trace of them.
+
+    Args:
+        custom_data: The user message's custom data, or None.
     """
     attachments = (custom_data or {}).get("attachments") or []
     if not isinstance(attachments, list):
@@ -365,7 +390,14 @@ def render_attachment_chips(custom_data: dict[str, Any] | None) -> None:
 
 
 def activity_line(step: dict[str, Any]) -> str:
-    """Markdown for one step of a turn's activity log."""
+    """Markdown for one step of a turn's activity log.
+
+    Args:
+        step: One step, with its ``label``, ``state`` and ``nested`` flag.
+
+    Returns:
+        The line, with a state icon and a mark for a specialist's step.
+    """
 
     label = str(step.get("label") or "")
     icon = _STEP_ICONS.get(step.get("state"))
@@ -374,7 +406,14 @@ def activity_line(step: dict[str, Any]) -> str:
 
 
 def activity_summary(activity: dict[str, Any]) -> str:
-    """The label of a finished turn's log, e.g. "Worked for 41 s · 4 steps"."""
+    """The label of a finished turn's log, e.g. "Worked for 41 s · 4 steps".
+
+    Args:
+        activity: The turn's log, with ``seconds`` and ``steps``.
+
+    Returns:
+        The label. Notes, which have no state, are not counted as steps.
+    """
 
     seconds = round(activity.get("seconds") or 0)
     duration = f"{seconds} s" if seconds < 60 else f"{seconds // 60} min {seconds % 60} s"
@@ -389,6 +428,9 @@ def render_activity(custom_data: dict[str, Any] | None) -> None:
 
     The log is kept on the message only for this browser session; a chat
     loaded from the server has none, and shows none.
+
+    Args:
+        custom_data: The answer's custom data; its ``activity`` is drawn.
     """
 
     activity = (custom_data or {}).get("activity")
@@ -457,5 +499,10 @@ def render_message(message: ChatMessage, show_system: bool = False) -> None:
 
 
 def render_streaming_token(response_text: str, message_placeholder: Any) -> None:
-    """Render the accumulated answer so far, with a trailing cursor."""
+    """Render the accumulated answer so far, with a trailing cursor.
+
+    Args:
+        response_text: The answer received so far.
+        message_placeholder: The page slot the answer is drawn into.
+    """
     message_placeholder.markdown(f"{sanitize_assistant_content(response_text)}▌")

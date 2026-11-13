@@ -67,7 +67,7 @@ async def _serve_until_the_client_leaves(response, *, moment: str) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("moment", MOMENTS)
 async def test_a_plain_response_loses_the_cleanup(moment: str) -> None:
-    """The failure being fixed. Without it, the test below proves nothing."""
+    """The control: without this failure, the test below would prove nothing."""
 
     log: list[str] = []
     await _serve_until_the_client_leaves(

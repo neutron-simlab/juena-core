@@ -66,7 +66,7 @@ def _package(middleware, state) -> str:
 
 
 def test_progress_sentence_without_structured_report_fails_closed(store) -> None:
-    """The original incident: a run that died mid-sentence must not read as a result."""
+    """A run that died mid-sentence must not read as a result."""
 
     middleware = SpecialistOutcomeMiddleware(specialist_name="software-specialist")
     state = {
@@ -536,8 +536,8 @@ def _filed_specialist(model):
 
 
 def test_a_researched_report_is_saved_to_findings_for_the_next_task() -> None:
-    """Whether a finding existed used to rest on the supervisor asking; after long
-    research it often did not. The server now keeps the report itself."""
+    """The server keeps the report itself. Left to the supervisor to ask for a
+    finding, after long research it often did not."""
     model = _ScriptedModel(responses=[*[_lookup_call(n) for n in range(3)], _report_call()])
 
     result = _filed_specialist(model).invoke(

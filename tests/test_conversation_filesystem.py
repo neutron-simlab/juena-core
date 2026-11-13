@@ -111,7 +111,7 @@ def test_nested_agent_file_is_visible_without_artifact_registration(files, monke
 
 
 def test_rewritten_output_is_delivered_once_with_its_latest_content(files, monkeypatch, tmp_path):
-    """Fix iterations used to deliver every version of the same output file."""
+    """Fix iterations rewrite one output; the user gets it once, not every version."""
     from juena_core.artifacts import ArtifactStore, set_artifact_store_for_tests
 
     store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")

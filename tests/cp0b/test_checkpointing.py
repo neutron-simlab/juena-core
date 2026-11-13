@@ -1,11 +1,10 @@
-"""CP0b, row 10: a two-node graph compiles and round-trips through
-``AsyncPostgresSaver`` against a real Postgres.
+"""A two-node graph compiles and round-trips through ``AsyncPostgresSaver``
+against a real Postgres.
 
 Requires a throwaway Postgres:
 ``docker compose -f tests/compose.postgres.yml up -d --wait``
-This intentionally does not skip when Postgres is unreachable — a skip would
-hide the property the plan needs measured, per the "measure it, do not
-reason around it" rule in the plan.
+It does not skip when Postgres is unreachable, because a skip would hide
+whether checkpointing really works.
 """
 
 from typing import TypedDict

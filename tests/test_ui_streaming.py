@@ -1,25 +1,10 @@
 """Behaviour of the Streamlit side of the server-sent-event contract.
 
-Moved here from juena-chatbot's ``test_chat_interface.py`` in plan 02/step 3.
 Everything below drives ``juena_core.ui.streaming``: the stream loop, the chunk
-classifiers, the status container and the two interrupt cards. What stayed in
-juena-chatbot is the page -- starter chips, upload rules, layout -- and the
-strings that describe *that* deployment's sandbox.
-
-Three things changed in the move, all of them the couplings CP5 turned into
-parameters:
-
-* the decision a card records is keyed ``interrupt_decision:…`` rather than
-  ``sandbox_decision:…``, because the kind is the application's to name;
-* an approval card is drawn only when the caller supplies an
-  :class:`~juena_core.ui.streaming.ApprovalCard`, so ``render_pending_interrupt``
-  is given one here;
-* ``stream_and_display_resume`` takes ``kind=`` and the arm's fields as
-  keywords instead of a positional decision.
-
-``test_ui_contracts.py`` holds CP5's coarser contracts for the same module,
-including the clarification twin of
-``test_failed_resume_reopens_the_command_for_another_click``.
+classifiers, the status container and the two interrupt cards. An approval
+card is drawn only when the caller supplies an
+:class:`~juena_core.ui.streaming.ApprovalCard`, so ``render_pending_interrupt``
+is given one here.
 """
 
 import asyncio
@@ -36,8 +21,9 @@ from juena_core.server.streaming.processor import StreamEventProcessor
 from juena_core.ui import streaming
 from juena_core.ui.components import activity_line, activity_summary
 
-#: The kind juena-chatbot registers. Core names none of its own, so any test
-#: that wants an approval card has to say which one it is rendering.
+#: The sandbox approval kind an application registers. Core names none of its
+#: own, so any test that wants an approval card has to say which one it is
+#: rendering.
 APPROVAL = streaming.ApprovalCard(kind="execute_approval")
 
 
@@ -514,11 +500,10 @@ def test_pending_approval_ignores_clicks_once_a_decision_is_taken(monkeypatch) -
 
 
 def test_an_approval_goes_unrendered_when_no_card_is_supplied(monkeypatch) -> None:
-    """The honest outcome for an application that registered no approval kind.
+    """What an application that registered no approval kind gets.
 
     Core has no name to resume this interrupt with, so it draws nothing rather
     than a card whose buttons would post a body the server's union rejects.
-    Vitess v2 is exactly this case.
     """
     session_state = _SessionState(
         thread_id="thread-1",
@@ -993,9 +978,9 @@ class _FakeLivePage:
 
 def test_live_view_redraws_in_final_form_without_empty_slots(monkeypatch) -> None:
     """The live view is rebuilt every 0.25 s. An empty slot that the same
-    redraw fills later can reach the browser on its own, so the answer
-    vanished and the step list jumped four times a second while a sandbox
-    command ran. Every element must be drawn once, already final."""
+    redraw fills later can reach the browser on its own, so the answer would
+    vanish and the step list jump four times a second while a sandbox command
+    runs. Every element must be drawn once, already final."""
     from juena_core.ui.run_stream import StreamController
 
     controller = StreamController()
@@ -1045,7 +1030,7 @@ def test_live_view_redraws_in_final_form_without_empty_slots(monkeypatch) -> Non
 def test_a_reader_finishing_mid_redraw_still_ends_with_its_final_state(monkeypatch) -> None:
     """After Stop, the reader can push the final "cancelled" state and finish
     while a redraw is drawing. Ending the reply in that redraw would use the
-    state it read before ("stopping"), and "Response stopped." never showed."""
+    state it read before ("stopping"), and "Response stopped." would never show."""
     from juena_core.ui.run_stream import StreamController
 
     controller = StreamController()

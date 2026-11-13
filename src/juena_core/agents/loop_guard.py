@@ -17,10 +17,9 @@ __all__ = [
     "RepeatedToolCallMiddleware",
 ]
 
-#: The value is preserved for existing checkpointed conversations even though its
-#: application-prefixed name now lives in core. It marks a refusal as ours, so prose
-#: matching would break the moment the message is reworded or translated, and
-#: would miscount a tool that happened to echo the text back.
+#: Marks a refusal as ours; prose matching would break the moment the message is
+#: reworded or translated, and would miscount a tool that echoed the text back.
+#: Keep the value: saved conversations already carry it.
 GUARD_FLAG = "juena_repeated_tool_call"
 
 REPEAT_ERROR = (
@@ -112,6 +111,11 @@ class RepeatedToolCallMiddleware(AgentMiddleware):
     """
 
     def __init__(self, *, repeat_limit: int = REPEAT_LIMIT) -> None:
+        """Initialize the guard.
+
+        Args:
+            repeat_limit: Refusals in a row after which the run ends.
+        """
         super().__init__()
         self._repeat_limit = repeat_limit
 
@@ -132,6 +136,15 @@ class RepeatedToolCallMiddleware(AgentMiddleware):
         )
 
     def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        """Run a tool call, unless it repeats the call that just returned.
+
+        Args:
+            request: The tool-call request.
+            handler: Runs the request.
+
+        Returns:
+            The handler's result, or a refusal message for a repeated call.
+        """
         blocked = self._blocked(request)
         return blocked if blocked is not None else handler(request)
 
@@ -140,11 +153,29 @@ class RepeatedToolCallMiddleware(AgentMiddleware):
         request: Any,
         handler: Callable[[Any], Awaitable[Any]],
     ) -> Any:
+        """Async version of :meth:`wrap_tool_call`.
+
+        Args:
+            request: The tool-call request.
+            handler: Runs the request.
+
+        Returns:
+            The handler's result, or a refusal message for a repeated call.
+        """
         blocked = self._blocked(request)
         return blocked if blocked is not None else await handler(request)
 
     @hook_config(can_jump_to=["end"])
     def before_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """End the run once enough refusals in a row close the history.
+
+        Args:
+            state: The agent state.
+            runtime: Unused.
+
+        Returns:
+            A jump to the end with a message for the user, or ``None`` to carry on.
+        """
         messages = state.get("messages", []) if isinstance(state, dict) else []
         count, name = _trailing_refusals(list(messages))
         if count < self._repeat_limit:
@@ -158,4 +189,13 @@ class RepeatedToolCallMiddleware(AgentMiddleware):
 
     @hook_config(can_jump_to=["end"])
     async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """Async version of :meth:`before_model`.
+
+        Args:
+            state: The agent state.
+            runtime: Unused.
+
+        Returns:
+            A jump to the end with a message for the user, or ``None`` to carry on.
+        """
         return self.before_model(state, runtime)

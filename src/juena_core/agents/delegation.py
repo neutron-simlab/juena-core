@@ -1,24 +1,21 @@
-"""The boundary a specialist is invoked across.
+"""What crosses into and out of a specialist when the supervisor delegates to it.
 
 `SubAgentMiddleware` hands a subagent the parent's whole state minus its private
-keys, and copies the subagent's whole state back the same way. That is a sensible
-default for an agent framework and the wrong one here, for two reasons that only
-show up in this agent topology:
+keys, and copies the subagent's whole state back the same way. Here that is
+wrong in both directions:
 
-*Going in.* The supervisor's `files` channel is not only findings. Summarization
-parks evicted conversation turns under `/conversation_history/` through the same
-channel, so a specialist -- which is told it cannot see the conversation -- was
-being handed the part of it the supervisor had already thrown away.
+*Going in.* The supervisor's `files` channel is not only findings.
+Summarization saves removed conversation turns under `/conversation_history/`
+in the same channel, and a specialist, which is told it cannot see the
+conversation, must not receive them.
 
 *Coming back.* Everything the run left in `files` returns, including findings it
-merely inherited on the way in. Re-writing an unchanged file is harmless until
-something else edits it in the meantime.
+only inherited on the way in. Rewriting an unchanged file undoes any edit made
+to it in the meantime.
 
-Neither is fixed by asking the specialist not to look, and neither should depend
-on remembering to re-check after the next upstream release adds a state field. So
-each specialist is registered through this adapter, which names what may cross in
-each direction. `SubAgentMiddleware` keeps its own semantics; the boundary is
-decided here, before invocation.
+So each specialist is registered through this adapter, which names what may
+cross in each direction. A state field added by a later library release then
+stays out until someone lets it cross.
 """
 
 from __future__ import annotations
@@ -56,6 +53,13 @@ def with_user_message(description: str, messages: Sequence[Any]) -> str:
     Only the latest message: an earlier one may hold a request the user has since
     replaced, so carrying context from earlier turns stays the supervisor's job.
     Nothing is added when the brief already contains the message word for word.
+
+    Args:
+        description: The brief the supervisor wrote for the specialist.
+        messages: The supervisor's message history.
+
+    Returns:
+        The brief, with the user's latest message attached when needed.
     """
 
     # Corrections have their own delivery path into each specialist. Attaching
@@ -95,6 +99,15 @@ class AttachUserMessageMiddleware(AgentMiddleware):
         return request.override(tool_call={**call, "args": {**args, "description": brief}})
 
     def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        """Run a tool call, with the user's message attached to a `task` brief.
+
+        Args:
+            request: The tool-call request.
+            handler: Runs the request.
+
+        Returns:
+            The handler's result.
+        """
         return handler(self._attached(request))
 
     async def awrap_tool_call(
@@ -102,6 +115,15 @@ class AttachUserMessageMiddleware(AgentMiddleware):
         request: Any,
         handler: Callable[[Any], Awaitable[Any]],
     ) -> Any:
+        """Async version of :meth:`wrap_tool_call`.
+
+        Args:
+            request: The tool-call request.
+            handler: Runs the request.
+
+        Returns:
+            The handler's result.
+        """
         return await handler(self._attached(request))
 
 
@@ -109,6 +131,12 @@ class SpecialistDelegate(Runnable[dict[str, Any], dict[str, Any]]):
     """One specialist, invoked with an allowlist rather than a snapshot."""
 
     def __init__(self, runnable: Runnable, *, name: str) -> None:
+        """Initialize the wrapper.
+
+        Args:
+            runnable: The compiled specialist.
+            name: The specialist's name.
+        """
         self._runnable = runnable
         self.name = name
 
@@ -138,6 +166,16 @@ class SpecialistDelegate(Runnable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """Run the specialist on the allowed part of the supervisor's state.
+
+        Args:
+            input: The supervisor's state.
+            config: Run config passed to the specialist.
+            **kwargs: Passed to the specialist's ``invoke``.
+
+        Returns:
+            The specialist's messages and the findings this run wrote.
+        """
         sent = self._inbound(input)
         return self._outbound(sent, self._runnable.invoke(sent, config, **kwargs))
 
@@ -147,6 +185,16 @@ class SpecialistDelegate(Runnable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """Async version of :meth:`invoke`.
+
+        Args:
+            input: The supervisor's state.
+            config: Run config passed to the specialist.
+            **kwargs: Passed to the specialist's ``ainvoke``.
+
+        Returns:
+            The specialist's messages and the findings this run wrote.
+        """
         sent = self._inbound(input)
         return self._outbound(sent, await self._runnable.ainvoke(sent, config, **kwargs))
 
@@ -154,14 +202,18 @@ class SpecialistDelegate(Runnable[dict[str, Any], dict[str, Any]]):
 def with_delegation_boundary(specialists: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Wrap each compiled specialist for registration with `SubAgentMiddleware`.
 
-    A specialist that already carries a boundary is left alone. An application
-    may need a boundary of its own -- `vitess-ai` returns one extra field, the
-    validated configuration of the module its specialist just configured -- and
-    it reaches this function through `build_supervisor_middleware`, which
-    applies the boundary itself. Wrapping twice would put core's outbound
-    allowlist outside the application's and silently drop the very field the
-    subclass exists to carry. Wrapping twice is never right in any case: the
-    second wrapper only ever removes what the first allowed.
+    A specialist that is already a `SpecialistDelegate` is left alone. An
+    application may subclass it to return one extra field, and
+    `build_supervisor_middleware` still passes every specialist through here.
+    Wrapping again would put core's outbound allowlist outside the
+    application's and silently drop that field. A second wrapper can only ever
+    remove what the first allowed.
+
+    Args:
+        specialists: Specialist specs, each with a ``name`` and a ``runnable``.
+
+    Returns:
+        The specs, each runnable wrapped in a `SpecialistDelegate`.
     """
 
     return [

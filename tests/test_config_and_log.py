@@ -1,4 +1,4 @@
-"""CP1 tests for explicit configuration and import-safe logging."""
+"""Tests for explicit configuration and import-safe logging."""
 
 from __future__ import annotations
 

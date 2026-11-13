@@ -1,5 +1,4 @@
-"""The agent registry, input handler, and runtime model middleware. See
-00-BOUNDARY.md, *Moves whole*."""
+"""The agent registry, input handler, and runtime model middleware."""
 
 from __future__ import annotations
 

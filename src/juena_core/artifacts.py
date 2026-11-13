@@ -20,7 +20,7 @@ from PIL import Image
 from juena_core.config import settings
 from juena_core.schema.interrupts import ArtifactRef
 
-# Artifact limits move with the store; they are delivery policy, not execution policy.
+# Artifact limits live with the store; they are delivery policy, not execution policy.
 MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
 MAX_FILE_ARTIFACT_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_ARTIFACTS_PER_TURN = 8
@@ -130,6 +130,12 @@ def undelivered_note(dropped: list[tuple[str, str]]) -> str:
 
     Shared so a file refused during a command and one refused during a write
     are described to the model in the same words.
+
+    Args:
+        dropped: ``(filename, reason)`` for each file that was not delivered.
+
+    Returns:
+        The text for the model.
     """
     lines = "\n".join(f"- {name}: {reason}" for name, reason in dropped)
     return (
@@ -229,6 +235,12 @@ class ArtifactStore:
     """Filesystem-backed artifacts with in-process live-stream queues."""
 
     def __init__(self, root: Path, audit_file: Path) -> None:
+        """Initialize the store.
+
+        Args:
+            root: Directory that holds one subdirectory per user.
+            audit_file: File that :meth:`audit` appends JSON lines to.
+        """
         self.root = root
         self.audit_file = audit_file
         self._lock = threading.RLock()
@@ -320,6 +332,30 @@ class ArtifactStore:
         group_id: str | None = None,
         group_label: str | None = None,
     ) -> ArtifactRef:
+        """Validate and save a generated file, and queue it for this turn.
+
+        Args:
+            user_id: Owner of the file.
+            thread_id: Conversation the file belongs to.
+            run_id: Run that produced the file, if known.
+            filename: Requested file name; unsafe characters are replaced.
+            content: The file's bytes.
+            caption: Caption shown with the file; ``None`` derives one from
+                the file name.
+            category: ``"result"`` for something the user asked for,
+                ``"record"`` for a transcript of an approved command.
+            workspace_path: Workspace file this came from; a result from the
+                same path earlier in the turn is replaced.
+            group_id: Identifier that groups related files.
+            group_label: Label shown for the group.
+
+        Returns:
+            The saved file's public reference.
+
+        Raises:
+            ValueError: The file type, content or size is not allowed, or the
+                turn has no room left for it.
+        """
         artifact_id = str(uuid4())
         safe_filename = self._safe_filename(filename)
         mime_type, kind, width, height = self._validate_artifact(safe_filename, content)
@@ -386,6 +422,16 @@ class ArtifactStore:
         return stored
 
     def get(self, user_id: str, artifact_id: str) -> tuple[ArtifactRef, bytes] | None:
+        """Load one of a user's files.
+
+        Args:
+            user_id: Owner of the file.
+            artifact_id: The file's id.
+
+        Returns:
+            The reference and the bytes, or ``None`` when the user has no such
+            file.
+        """
         with self._lock:
             stored = self._load(user_id, artifact_id)
             if stored is None:
@@ -397,6 +443,17 @@ class ArtifactStore:
         return stored.public_ref(), content
 
     def claim_for_message(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
+        """Take every file queued this turn, to attach to the final message.
+
+        Clears the turn's accounting, so the files are claimed once.
+
+        Args:
+            user_id: Owner of the conversation.
+            thread_id: The conversation.
+
+        Returns:
+            The files' references as JSON-ready dicts.
+        """
         with self._lock:
             pending = self._pending_message.pop((user_id, thread_id), None)
             ids = pending.ids if pending is not None else []
@@ -404,7 +461,15 @@ class ArtifactStore:
         return [ref.model_dump(mode="json") for ref in refs]
 
     def peek_result_refs(self, user_id: str, thread_id: str) -> list[ArtifactRef]:
-        """Return pending user-result references without claiming message delivery."""
+        """Return pending user-result references without claiming message delivery.
+
+        Args:
+            user_id: Owner of the conversation.
+            thread_id: The conversation.
+
+        Returns:
+            References to this turn's result files, records excluded.
+        """
 
         with self._lock:
             pending = self._pending_message.get((user_id, thread_id))
@@ -416,7 +481,16 @@ class ArtifactStore:
             ]
 
     def peek_undelivered(self, user_id: str, thread_id: str) -> list[tuple[str, str]]:
-        """Return pending delivery failures without consuming the final report notice."""
+        """Return pending delivery failures without consuming the final report notice.
+
+        Args:
+            user_id: Owner of the conversation.
+            thread_id: The conversation.
+
+        Returns:
+            ``(filename, reason)`` pairs, plus one summary pair for notices
+            beyond the per-turn cap.
+        """
 
         with self._lock:
             pending = self._pending_message.get((user_id, thread_id))
@@ -441,7 +515,16 @@ class ArtifactStore:
         filename: str,
         reason: str,
     ) -> None:
-        """Queue a file that reached the workspace but will not reach the user."""
+        """Queue a file that reached the workspace but will not reach the user.
+
+        Beyond the per-turn cap, only a count is kept.
+
+        Args:
+            user_id: Owner of the conversation.
+            thread_id: The conversation.
+            filename: The file that was not delivered.
+            reason: Why it was not delivered.
+        """
         with self._lock:
             key = (user_id, thread_id)
             pending = self._pending_message.setdefault(key, _PendingTurn())
@@ -451,7 +534,16 @@ class ArtifactStore:
                 pending.undelivered_omitted += 1
 
     def drain_undelivered(self, user_id: str, thread_id: str) -> list[tuple[str, str]]:
-        """Take queued notices for an execution result or final specialist report."""
+        """Take queued notices for an execution result or final specialist report.
+
+        Args:
+            user_id: Owner of the conversation.
+            thread_id: The conversation.
+
+        Returns:
+            ``(filename, reason)`` pairs, plus one summary pair for notices
+            beyond the per-turn cap; the queue is then empty.
+        """
         with self._lock:
             pending = self._pending_message.get((user_id, thread_id))
             if pending is None or not pending.undelivered:
@@ -477,12 +569,26 @@ class ArtifactStore:
         message. A cancelled stream or a crashed run never gets there, and the
         leftovers would both eat the next turn's budget and attach themselves to
         the next turn's answer.
+
+        Args:
+            user_id: Owner of the conversation.
+            thread_id: The conversation.
         """
         with self._lock:
             self._pending_message.pop((user_id, thread_id), None)
             self._pending_events.pop((user_id, thread_id), None)
 
     def drain_events(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
+        """Take the artifact events queued for the live stream.
+
+        Args:
+            user_id: Owner of the conversation.
+            thread_id: The conversation.
+
+        Returns:
+            One ``artifact`` event per queued file that still loads; images
+            also carry their bytes as base64.
+        """
         with self._lock:
             ids = self._pending_events.pop((user_id, thread_id), [])
             records = [self.get(user_id, item) for item in ids]
@@ -498,6 +604,12 @@ class ArtifactStore:
         return events
 
     def delete_thread(self, user_id: str, thread_id: str) -> None:
+        """Delete a conversation's files and anything queued for it.
+
+        Args:
+            user_id: Owner of the conversation.
+            thread_id: The conversation.
+        """
         with self._lock:
             user_root = self._user_root(user_id)
             for metadata_path in user_root.glob("*.json") if user_root.is_dir() else ():
@@ -510,6 +622,11 @@ class ArtifactStore:
             self._pending_events.pop((user_id, thread_id), None)
 
     def audit(self, record: dict[str, Any]) -> None:
+        """Append a timestamped record to the audit file as one JSON line.
+
+        Args:
+            record: The fields to record.
+        """
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             **record,
@@ -525,6 +642,11 @@ _artifact_store_lock = threading.Lock()
 
 
 def get_artifact_store() -> ArtifactStore:
+    """Return the process-wide artifact store, creating it on first use.
+
+    Returns:
+        The store at the configured ``ARTIFACT_ROOT`` and ``AUDIT_FILE``.
+    """
     global _artifact_store
     if _artifact_store is None:
         with _artifact_store_lock:
@@ -538,5 +660,11 @@ def get_artifact_store() -> ArtifactStore:
 
 
 def set_artifact_store_for_tests(store: ArtifactStore | None) -> None:
+    """Replace the process-wide artifact store, for tests.
+
+    Args:
+        store: The store to use; ``None`` means the next call to
+            :func:`get_artifact_store` creates a new one.
+    """
     global _artifact_store
     _artifact_store = store

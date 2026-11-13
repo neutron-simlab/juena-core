@@ -1,4 +1,4 @@
-"""Process helpers for CP0b's throwaway HTTP MCP server."""
+"""Start and stop the throwaway HTTP MCP server in its own process."""
 
 from __future__ import annotations
 

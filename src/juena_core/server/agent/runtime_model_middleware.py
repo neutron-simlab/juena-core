@@ -4,9 +4,9 @@ The UI owns provider/model selection. The server passes that selection through
 LangChain runtime context on every invocation, and this middleware swaps the
 request model at call time so compiled agent graphs do not need to be rebuilt.
 
-``RuntimeModelContext`` also carries ``thread_id`` and ``user_id`` — half the
-identity seam. ``user_id`` is the string form of ``Principal.id``, and it is
-what a tool reads to scope a per-user store or artifact namespace.
+``RuntimeModelContext`` also carries ``thread_id`` and ``user_id``. ``user_id``
+is the string form of ``Principal.id``, and it is what a tool reads to scope a
+per-user store or artifact namespace.
 """
 
 from __future__ import annotations
@@ -29,14 +29,21 @@ __all__ = ["RuntimeModelContext", "RuntimeModelMiddleware"]
 class RuntimeModelContext:
     """Per-request runtime context: which model to use, and whose run this is.
 
-    ``run_id`` identifies one invocation of the graph, and it travels here
-    rather than in the ``RunnableConfig`` because a subgraph does not inherit
-    the parent's config ``run_id``. LangGraph populates
-    ``Runtime.execution_info.run_id`` from the config of the graph actually
-    running, so inside a specialist subagent it is ``None`` -- while the
-    runtime *context* is passed down unchanged. Execution evidence is written
-    inside a specialist and read outside it, so the id both halves agree on has
-    to be the one that crosses that boundary.
+    Attributes:
+        provider: The model provider for this request.
+        model: The model name for this request.
+        thread_id: The conversation thread.
+        user_id: The caller's id, as a string.
+        run_id: The id of this graph invocation. It travels here, not only in
+            the ``RunnableConfig``, because a subgraph does not inherit the
+            parent's config ``run_id`` (inside a specialist subagent
+            ``Runtime.execution_info.run_id`` is ``None``), while the runtime
+            context is passed down unchanged. Execution evidence is written
+            inside a specialist and read outside it, so both sides need an id
+            that reaches both.
+        control: Handle for steering and stopping the live run, if any. It
+            exists only while the run executes: runtime context is never
+            checkpointed.
     """
 
     provider: str
@@ -44,7 +51,6 @@ class RuntimeModelContext:
     thread_id: str | None = None
     user_id: str | None = None
     run_id: str | None = None
-    # Execution-only handle. Runtime context is never checkpointed.
     control: Any = None
 
 
@@ -91,10 +97,9 @@ class RuntimeModelMiddleware(AgentMiddleware):
                 "max_retries": 0,
             }
             # Explicit ``streaming=False`` sets LangChain's internal
-            # ``_streaming_disabled`` flag. That prevents LangGraph's messages mode
-            # from attaching its streaming callback after a runtime model swap. True
-            # is meaningful and must be preserved; false means leave the option
-            # unset, as the original production model does.
+            # ``_streaming_disabled`` flag, which stops LangGraph's messages mode
+            # from attaching its streaming callback to the swapped-in model. So
+            # copy True across, and otherwise leave the option unset.
             if bool(getattr(request.model, "streaming", False)):
                 model_kwargs["streaming"] = True
             llm = build_chat_model(**model_kwargs)
@@ -112,7 +117,15 @@ class RuntimeModelMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        """Select the model for the current sync request."""
+        """Select the model for the current sync request.
+
+        Args:
+            request: The model request about to be sent.
+            handler: Sends the request and returns the model's response.
+
+        Returns:
+            The model's response.
+        """
 
         return handler(self._override_request_model(request))
 
@@ -121,6 +134,14 @@ class RuntimeModelMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Any],
     ) -> ModelResponse:
-        """Select the model for the current async request."""
+        """Select the model for the current async request.
+
+        Args:
+            request: The model request about to be sent.
+            handler: Sends the request and returns the model's response.
+
+        Returns:
+            The model's response.
+        """
 
         return await handler(self._override_request_model(request))

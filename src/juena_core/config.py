@@ -18,9 +18,41 @@ __all__ = ["CoreSettings", "configure", "settings"]
 class CoreSettings:
     """Values consumed by shared core modules.
 
-    The capitalised names intentionally match the existing application
-    settings, making the eventual cutover a mechanical hand-off rather than a
-    second configuration system.
+    The capitalised names match the application's own settings, so an
+    application can fill this field by field rather than keep a second
+    configuration system.
+
+    Attributes:
+        OPENAI_API_KEY: OpenAI API key; the provider is unavailable without it.
+        BLABLADOR_API_KEY: Blablador API key, or an async function that returns
+            one for the current request.
+        BLABLADOR_BASE_URL: Base URL of the Blablador endpoint.
+        MAX_TOKENS: Default maximum tokens per model answer.
+        TIMEOUT_SECONDS: Default model request timeout.
+        MAX_RETRIES: Default number of retries inside the model client.
+        DEFAULT_PROVIDER: Provider used when a request names none.
+        DEFAULT_MODEL: Model used when a request names none.
+        OPENAI_AVAILABLE_MODELS: Comma-separated OpenAI models to offer; empty
+            offers them all.
+        BLABLADOR_AVAILABLE_MODELS: Comma-separated Blablador models to offer;
+            empty offers them all.
+        OPENAI_DEFAULT_MODEL: Default OpenAI model.
+        BLABLADOR_DEFAULT_MODEL: Default Blablador model.
+        STREAM_TOOL_PAYLOADS: Whether chat messages sent to clients include
+            tool-call payloads.
+        DATABASE_URL: PostgreSQL connection URL.
+        DATABASE_POOL_MAX_SIZE: Largest size of the database connection pool.
+        SESSION_TTL_HOURS: How long a sign-in session lasts.
+        FALLBACK_PROVIDER: Provider whose default model is the fallback when no
+            explicit fallback models are given; empty means no fallback.
+        EXECUTE_TIMEOUT_SECONDS: Longest timeout an agent may set for one
+            ``execute`` call.
+        ARTIFACT_ROOT: Directory where generated files are stored.
+        AUDIT_FILE: File that artifact audit records are appended to.
+        LOG_LEVEL: Logging level name, such as ``"INFO"``.
+        BIND_HOST: Host the API listens on.
+        API_PUBLISHED: Whether the API port is reachable from outside its
+            container.
     """
 
     OPENAI_API_KEY: str | None
@@ -66,6 +98,12 @@ def configure(settings_: CoreSettings) -> None:
     Applications call this once at startup. Repeating the same configuration
     is harmless, but replacing it would leave cached models and other
     process-level resources paired with stale values.
+
+    Args:
+        settings_: The settings to install.
+
+    Raises:
+        RuntimeError: Different settings were already installed.
     """
 
     global _settings
@@ -75,7 +113,14 @@ def configure(settings_: CoreSettings) -> None:
 
 
 def settings() -> CoreSettings:
-    """Return configured settings, failing clearly before application startup."""
+    """Return configured settings, failing clearly before application startup.
+
+    Returns:
+        The settings passed to :func:`configure`.
+
+    Raises:
+        RuntimeError: :func:`configure` has not been called yet.
+    """
 
     if _settings is None:
         raise RuntimeError("juena_core.configure() has not been called")

@@ -110,10 +110,27 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
     """Root-scoped filesystem backend that rejects agent-authored changes."""
 
     def __init__(self, *args: Any, label: str = "read-only", **kwargs: Any) -> None:
+        """Initialize the backend.
+
+        Args:
+            *args: Passed to ``FilesystemBackend``.
+            label: Names the path kind in refusal messages, such as
+                ``"read-only repository"``.
+            **kwargs: Passed to ``FilesystemBackend``.
+        """
         super().__init__(*args, **kwargs)
         self._label = label
 
     def write(self, file_path: str, content: str) -> WriteResult:
+        """Refuse the write.
+
+        Args:
+            file_path: Path the agent tried to write.
+            content: Ignored.
+
+        Returns:
+            A result carrying the refusal.
+        """
         return WriteResult(error=f"Cannot write to {self._label} path '{file_path}'.")
 
     def edit(
@@ -123,6 +140,17 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
         new_string: str,
         replace_all: bool = False,  # noqa: FBT001, FBT002
     ) -> EditResult:
+        """Refuse the edit.
+
+        Args:
+            file_path: Path the agent tried to edit.
+            old_string: Ignored.
+            new_string: Ignored.
+            replace_all: Ignored.
+
+        Returns:
+            A result carrying the refusal.
+        """
         return EditResult(error=f"Cannot edit {self._label} path '{file_path}'.")
 
 
@@ -134,6 +162,15 @@ class ReadOnlyInputsStateBackend(StateBackend):
         return file_path == "/inputs" or file_path.startswith("/inputs/")
 
     def write(self, file_path: str, content: str) -> WriteResult:
+        """Write a file in graph state, except under ``/inputs``.
+
+        Args:
+            file_path: Path to write.
+            content: Text to write.
+
+        Returns:
+            The write result, or a refusal for a staged input.
+        """
         if self._is_read_only_path(file_path):
             return WriteResult(error=f"Cannot write to read-only staged input path '{file_path}'.")
         return super().write(file_path, content)
@@ -145,6 +182,17 @@ class ReadOnlyInputsStateBackend(StateBackend):
         new_string: str,
         replace_all: bool = False,  # noqa: FBT001, FBT002
     ) -> EditResult:
+        """Edit a file in graph state, except under ``/inputs``.
+
+        Args:
+            file_path: Path to edit.
+            old_string: Text to replace.
+            new_string: Replacement text.
+            replace_all: Whether to replace every occurrence.
+
+        Returns:
+            The edit result, or a refusal for a staged input.
+        """
         if self._is_read_only_path(file_path):
             return EditResult(error=f"Cannot edit read-only staged input path '{file_path}'.")
         return super().edit(file_path, old_string, new_string, replace_all=replace_all)
@@ -153,32 +201,26 @@ class ReadOnlyInputsStateBackend(StateBackend):
 class FindingsStateBackend(StateBackend):
     """``/findings/`` on the graph's ``files`` channel, with the path kept intact.
 
-    Two problems make this class necessary rather than a plain ``StateBackend``.
+    It must be a route. Without one, ``/findings/`` falls to the specialist
+    backend's default: graph state without the sandbox, but the sandbox
+    container with it, whose root filesystem is read-only, so `write_file`
+    fails. A background specialist never has a sandbox, so only graph state
+    lets the two kinds of run exchange findings.
 
-    *It must be a route.* Left to a specialist backend's default, ``/findings/``
-    is graph state without the sandbox but the Podman container **with** it --
-    and that container's root filesystem is read-only, so `write_file` failed
-    outright with ``Errno 30: Read-only file system: '/findings'``. A background
-    specialist never has a sandbox, so the two halves could not exchange anything
-    even when the write succeeded.
+    A route, though, rewrites the key: ``CompositeBackend`` strips a matched
+    prefix before delegating and re-adds it to whatever comes back. A plain
+    ``StateBackend`` would store ``/findings/survey.md`` as ``/survey.md``,
+    which the prefix filter that picks out a background run's findings would
+    miss. So this class adds the prefix when storing and strips it when
+    returning.
 
-    *But a route rewrites the key.* ``CompositeBackend`` strips a matched prefix
-    before delegating and re-adds it to whatever comes back, so a plain
-    ``StateBackend`` here would store ``/findings/survey.md`` as ``/survey.md`` --
-    indistinguishable from any other top-level file, and missed by the prefix
-    filter application background-work code uses to decide what a background run produced.
-
-    So this presents the stripped view the composite expects while storing the
-    full path: prefix on the way in, strip on the way out.
-
-    **Synchronous methods only.** ``BackendProtocol`` implements every ``a*``
-    method as ``asyncio.to_thread(self.<sync>, ...)``, so an async call already
-    arrives here -- and an ``a*`` override that maps the path as well applies the
-    mapping twice, storing ``/findings/findings/survey.md`` on the path the
-    running agent actually takes. The same rule explains why ``glob`` and
-    ``grep`` are overridden rather than ``glob_info`` / ``grep_raw``:
-    ``StateBackend`` implements the public pair directly against its own state
-    and never calls the underscore variants.
+    Override only the synchronous methods. ``BackendProtocol`` runs every
+    ``a*`` method as ``asyncio.to_thread(self.<sync>, ...)``, so an ``a*``
+    override that also mapped the path would map it twice
+    (``/findings/findings/survey.md``). Likewise ``glob`` and ``grep`` are
+    overridden rather than ``glob_info`` / ``grep_raw``, because
+    ``StateBackend`` implements the public pair directly and never calls the
+    underscore variants.
     """
 
     _PREFIX = "/findings"
@@ -200,18 +242,55 @@ class FindingsStateBackend(StateBackend):
         return entries
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        """Read a finding.
+
+        Args:
+            file_path: Path below ``/findings``, as the composite passes it.
+            offset: First line to read.
+            limit: Maximum number of lines to read.
+
+        Returns:
+            The read result.
+        """
         return super().read(self._stored(file_path), offset=offset, limit=limit)
 
     def ls(self, path: str) -> LsResult:
+        """List the findings in a directory.
+
+        Args:
+            path: Directory below ``/findings``.
+
+        Returns:
+            The entries, with paths in the form the composite re-prefixes.
+        """
         result = super().ls(self._stored(path))
         return LsResult(entries=self._remap(result.entries), error=result.error)
 
     def glob(self, pattern: str, path: str | None = None) -> Any:
+        """Find findings whose path matches a glob pattern.
+
+        Args:
+            pattern: Glob pattern.
+            path: Directory to search; ``None`` means all findings.
+
+        Returns:
+            The glob result, with paths in the form the composite re-prefixes.
+        """
         result = super().glob(pattern, self._stored(path or "/"))
         result.matches = self._remap(result.matches)
         return result
 
     def grep(self, pattern: str, path: str | None = None, glob: str | None = None) -> Any:
+        """Search the findings for a pattern.
+
+        Args:
+            pattern: Pattern to search for.
+            path: Directory to search; ``None`` means all findings.
+            glob: Glob pattern that limits which files are searched.
+
+        Returns:
+            The grep result, with paths in the form the composite re-prefixes.
+        """
         result = super().grep(pattern, self._stored(path or "/"), glob)
         result.matches = self._remap(result.matches)
         return result
@@ -230,14 +309,23 @@ class FindingsStateBackend(StateBackend):
         return self._stored(file_path).startswith(self._PREFIX + self._RESERVED)
 
     def write(self, file_path: str, content: str) -> WriteResult:
+        """Create a finding.
+
+        Args:
+            file_path: Path below ``/findings``, as the composite passes it.
+            content: Text of the finding.
+
+        Returns:
+            The write result, or an error when the file already exists or the
+            path is in the reserved conflict area.
+        """
         if self._reserved(file_path):
             return WriteResult(error=self._RESERVED_ERROR)
         stored_path = self._stored(file_path)
-        # Deep Agents 0.7 changed StateBackend.write from create-only to an
-        # upsert. Findings accumulate across turns, so silently replacing an
-        # existing report loses evidence. Keep creation and editing as two
-        # explicit operations at this boundary: write_file creates; edit_file
-        # is the only way to change something already established.
+        # StateBackend.write replaces an existing file (Deep Agents 0.7+).
+        # Findings accumulate across turns, so replacing a report would lose
+        # evidence: write_file only creates, and edit_file is the only way to
+        # change an existing finding.
         if stored_path in self._read_files():
             return WriteResult(
                 error=(
@@ -254,6 +342,17 @@ class FindingsStateBackend(StateBackend):
         new_string: str,
         replace_all: bool = False,  # noqa: FBT001, FBT002
     ) -> EditResult:
+        """Edit an existing finding.
+
+        Args:
+            file_path: Path below ``/findings``, as the composite passes it.
+            old_string: Text to replace.
+            new_string: Replacement text.
+            replace_all: Whether to replace every occurrence.
+
+        Returns:
+            The edit result, or an error for the reserved conflict area.
+        """
         if self._reserved(file_path):
             return EditResult(error=self._RESERVED_ERROR)
         return super().edit(
@@ -264,21 +363,14 @@ class FindingsStateBackend(StateBackend):
 class ReadOnlyFindingsStateBackend(FindingsStateBackend):
     """What specialists established, for the supervisor to read but never add to.
 
-    The supervisor delegates rather than researches, so its backend refuses
-    everything outside ``/memories/``. That line was drawn one notch too tight:
-    it also blocked reading what came *back*, leaving the supervisor unable to
-    confirm that a specialist wrote the finding it claimed, or to reconcile two
-    reports without delegating a third time to do it.
-
-    Reading is the whole of the grant. ``/findings/`` records what somebody
-    observed -- paths, line numbers, values -- and the supervisor deals in
-    paraphrase of reports; letting it write here would file its own summary as
-    evidence. It also still has no way to *gather* anything: no repository
-    search, no sandbox. It can read what specialists found, not become one.
+    Reading lets the supervisor confirm that a specialist wrote the finding it
+    claimed, and reconcile two reports without delegating again. Writing is
+    refused: ``/findings/`` records what somebody observed (paths, line
+    numbers, values), and a supervisor summary written here would pass as
+    evidence.
 
     Synchronous overrides only, for the reason :class:`FindingsStateBackend`
-    documents -- ``BackendProtocol`` routes every ``a*`` method through its plain
-    counterpart, so the refusal is inherited rather than restated.
+    gives: the ``a*`` methods call these, so they refuse too.
     """
 
     _ERROR = (
@@ -287,6 +379,15 @@ class ReadOnlyFindingsStateBackend(FindingsStateBackend):
     )
 
     def write(self, file_path: str, content: str) -> WriteResult:
+        """Refuse the write.
+
+        Args:
+            file_path: Ignored.
+            content: Ignored.
+
+        Returns:
+            A result carrying the refusal.
+        """
         return WriteResult(error=self._ERROR)
 
     def edit(
@@ -296,6 +397,17 @@ class ReadOnlyFindingsStateBackend(FindingsStateBackend):
         new_string: str,
         replace_all: bool = False,  # noqa: FBT001, FBT002
     ) -> EditResult:
+        """Refuse the edit.
+
+        Args:
+            file_path: Ignored.
+            old_string: Ignored.
+            new_string: Ignored.
+            replace_all: Ignored.
+
+        Returns:
+            A result carrying the refusal.
+        """
         return EditResult(error=self._ERROR)
 
 
@@ -305,12 +417,39 @@ class SupervisorStateBackend(StateBackend):
     _ERROR = "The supervisor can access only /memories; delegate domain files to a specialist."
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        """Refuse the read.
+
+        Args:
+            file_path: Ignored.
+            offset: Ignored.
+            limit: Ignored.
+
+        Returns:
+            A result carrying the refusal.
+        """
         return ReadResult(error=self._ERROR)
 
     def ls(self, path: str) -> LsResult:
+        """List nothing.
+
+        Args:
+            path: Ignored.
+
+        Returns:
+            An empty listing.
+        """
         return LsResult(entries=[])
 
     def glob_info(self, pattern: str, path: str = "/") -> list[dict[str, Any]]:
+        """Match nothing.
+
+        Args:
+            pattern: Ignored.
+            path: Ignored.
+
+        Returns:
+            An empty list.
+        """
         return []
 
     def grep_raw(
@@ -319,9 +458,28 @@ class SupervisorStateBackend(StateBackend):
         path: str | None = None,
         glob: str | None = None,
     ) -> list[GrepMatch] | str:
+        """Refuse the search.
+
+        Args:
+            pattern: Ignored.
+            path: Ignored.
+            glob: Ignored.
+
+        Returns:
+            The refusal message.
+        """
         return self._ERROR
 
     def write(self, file_path: str, content: str) -> WriteResult:
+        """Refuse the write.
+
+        Args:
+            file_path: Ignored.
+            content: Ignored.
+
+        Returns:
+            A result carrying the refusal.
+        """
         return WriteResult(error=self._ERROR)
 
     def edit(
@@ -331,11 +489,32 @@ class SupervisorStateBackend(StateBackend):
         new_string: str,
         replace_all: bool = False,  # noqa: FBT001, FBT002
     ) -> EditResult:
+        """Refuse the edit.
+
+        Args:
+            file_path: Ignored.
+            old_string: Ignored.
+            new_string: Ignored.
+            replace_all: Ignored.
+
+        Returns:
+            A result carrying the refusal.
+        """
         return EditResult(error=self._ERROR)
 
 
 def user_store_namespace(runtime: Any) -> tuple[str, str]:
-    """Scope persistent files to the trusted authenticated user UUID."""
+    """Scope persistent files to the trusted authenticated user UUID.
+
+    Args:
+        runtime: The graph runtime, whose context holds ``user_id``.
+
+    Returns:
+        The store namespace ``("memories", <user UUID>)``.
+
+    Raises:
+        ValueError: The context has no user id, or it is not a UUID.
+    """
 
     context = runtime.context
     value = (
@@ -349,7 +528,14 @@ def user_store_namespace(runtime: Any) -> tuple[str, str]:
 
 
 def build_supervisor_backend(store: Any) -> CompositeBackend:
-    """Expose per-user memory while retaining the shared staged-files state channel."""
+    """Expose per-user memory while retaining the shared staged-files state channel.
+
+    Args:
+        store: The LangGraph store that holds each user's ``/memories/``.
+
+    Returns:
+        The supervisor's composite backend.
+    """
 
     from juena_core.filesystem.service import get_filesystem
     from juena_core.filesystem.backend import ConversationBackend
@@ -363,18 +549,14 @@ def build_supervisor_backend(store: Any) -> CompositeBackend:
                 store=store,
                 namespace=user_store_namespace,
             ),
-            # Where summarization parks the turns it evicts, one file per thread.
-            # Without this route the write fell to `SupervisorStateBackend`, which
-            # refuses everything outside `/memories/` -- so the supervisor's
-            # summaries came with no history to read back, and the evicted
-            # conversation was simply gone. State, not the store: this is
-            # per-thread working memory, not something the user owns across
-            # threads, and the checkpointer already persists it.
+            # Where summarization saves the turns it removes, one file per thread.
+            # Without this route the write would fall to `SupervisorStateBackend`,
+            # which refuses everything outside `/memories/`, and the removed turns
+            # would be lost. State, not the store: this is per-thread working
+            # memory, and the checkpointer already saves it.
             "/conversation_history/": StateBackend(),
-            # A specialist's `files` merge back into this same channel when its
-            # delegation returns, so the evidence was always here -- the
-            # supervisor was simply not allowed to look at it. Read-only; see
-            # `ReadOnlyFindingsStateBackend` for where that line falls and why.
+            # A specialist's `files` merge back into this channel when its
+            # delegation returns. Read-only; see `ReadOnlyFindingsStateBackend`.
             FINDINGS_PREFIX: ReadOnlyFindingsStateBackend(),
         },
     )

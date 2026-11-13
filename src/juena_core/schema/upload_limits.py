@@ -62,7 +62,21 @@ DEFAULT_SUFFIXES: frozenset[str] = frozenset(
 
 @dataclass(frozen=True)
 class UploadPolicy:
-    """Application upload limits; binary files require a conversation filesystem."""
+    """Application upload limits; binary files require a conversation filesystem.
+
+    Creating a policy raises ``ValueError`` when the text and binary
+    extensions overlap, a binary extension is not TIFF, an extension is not
+    lowercase with a leading dot, or a limit is not positive.
+
+    Attributes:
+        text_suffixes: Extensions accepted as text, such as ``".py"``.
+        binary_suffixes: Extensions accepted as binary; only ``.tif`` and
+            ``.tiff``.
+        max_text_bytes: Largest text file.
+        max_binary_bytes: Largest binary file.
+        max_total_bytes: Largest combined size of one message's files.
+        max_files: Most files per message.
+    """
 
     text_suffixes: frozenset[str] = DEFAULT_SUFFIXES
     binary_suffixes: frozenset[str] = frozenset()
@@ -83,9 +97,18 @@ class UploadPolicy:
 
     @property
     def suffixes(self) -> frozenset[str]:
+        """Every accepted extension, text and binary."""
         return self.text_suffixes | self.binary_suffixes
 
     def file_limit(self, filename: str) -> int:
+        """Return the size limit for one file.
+
+        Args:
+            filename: The file's name; its extension picks the limit.
+
+        Returns:
+            ``max_binary_bytes`` for a binary extension, else ``max_text_bytes``.
+        """
         return self.max_binary_bytes if Path(filename).suffix.lower() in self.binary_suffixes else self.max_text_bytes
 
 
@@ -94,7 +117,15 @@ def is_text_readable_filename(
     *,
     allowed_suffixes: Collection[str] = DEFAULT_SUFFIXES,
 ) -> bool:
-    """Return whether *filename* uses one of the supplied extensions."""
+    """Return whether *filename* uses one of the supplied extensions.
+
+    Args:
+        filename: The file's name; ``None`` counts as no extension.
+        allowed_suffixes: Accepted extensions, lowercase with a leading dot.
+
+    Returns:
+        Whether the lowercased extension is accepted.
+    """
 
     return Path(filename or "").suffix.lower() in allowed_suffixes
 
@@ -107,7 +138,19 @@ def validate_attachments(
     max_files: int = MAX_ATTACHMENTS_PER_MESSAGE,
     upload_policy: UploadPolicy | None = None,
 ) -> list[str]:
-    """Return human-readable reasons why *attachments* would be rejected."""
+    """Return human-readable reasons why *attachments* would be rejected.
+
+    Args:
+        attachments: ``(filename, size)`` pairs; a ``None`` size is not checked.
+        allowed_suffixes: Accepted extensions.
+        max_bytes: Largest file.
+        max_files: Most files.
+        upload_policy: When given, its extensions and limits replace the three
+            arguments above, and the combined size is checked too.
+
+    Returns:
+        One message per problem; empty when the attachments are acceptable.
+    """
 
     errors: list[str] = []
     if upload_policy is not None:

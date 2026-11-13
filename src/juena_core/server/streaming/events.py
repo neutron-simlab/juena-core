@@ -51,27 +51,84 @@ PHASE_DONE = "done"
 
 
 def thread_event(thread_id: str) -> dict[str, Any]:
+    """Build the event that tells the client which thread it is on.
+
+    Args:
+        thread_id: The conversation thread.
+
+    Returns:
+        The ``thread`` payload.
+    """
+
     return {"type": "thread", "thread_id": thread_id}
 
 
 def token_event(content: str) -> dict[str, Any]:
+    """Build the event for one chunk of the answer text.
+
+    Args:
+        content: The text chunk.
+
+    Returns:
+        The ``token`` payload.
+    """
+
     return {"type": "token", "content": content}
 
 
 def message_event(message: ChatMessage) -> dict[str, Any]:
+    """Build the event for one complete message.
+
+    Args:
+        message: The message to send.
+
+    Returns:
+        The ``message`` payload, with the message as JSON.
+    """
+
     return {"type": "message", "content": message.model_dump(mode="json")}
 
 
 def status_event(phase: str, label: str, **extra: Any) -> dict[str, Any]:
+    """Build the event for one line of agent activity.
+
+    Args:
+        phase: One of the ``PHASE_*`` values.
+        label: The line to show.
+        **extra: More fields for the payload, such as ``tool_call_id``.
+
+    Returns:
+        The ``status`` payload.
+    """
+
     return {"type": "status", "phase": phase, "label": label, **extra}
 
 
 def error_event(content: str) -> dict[str, Any]:
+    """Build the event for a failure the client should show.
+
+    Args:
+        content: The message to show.
+
+    Returns:
+        The ``error`` payload.
+    """
+
     return {"type": "error", "content": content}
 
 
 def clarification_required_event(interrupt_id: str, value: dict[str, Any]) -> dict[str, Any]:
-    """Surface a question an agent raised with ``ask_user``."""
+    """Surface a question an agent raised with ``ask_user``.
+
+    Args:
+        interrupt_id: The pending interrupt's id.
+        value: The interrupt's value: the question, who asked it, and any
+            options.
+
+    Returns:
+        The ``clarification_required`` payload; options that are not strings
+        are left out.
+    """
 
     options = value.get("options")
     return {
@@ -94,10 +151,19 @@ def approval_required_event(
     """Surface a pending ``HumanInTheLoopMiddleware`` action for approval.
 
     The ``action_requests``/``review_configs`` shape is LangChain's, so the
-    unpacking is shared. ``extra_limits`` is not: the card tells a person what
-    the action is allowed to do, and only the application knows — "network:
-    none, 2 vCPU, 4 GB" describes juena-chatbot's Podman sandbox and would be a
-    false promise from anywhere else.
+    unpacking is shared here.
+
+    Args:
+        interrupt_id: The pending interrupt's id.
+        value: The interrupt's value from the middleware.
+        extra_limits: What the action is allowed to do, shown on the card.
+            Only the application knows this (for example its sandbox's network
+            and CPU limits); a fixed text here would be a false promise for
+            any other application.
+
+    Returns:
+        The ``approval_required`` payload. A batch of several actions lists
+        each one under ``actions``.
     """
 
     action_requests = value.get("action_requests") or []

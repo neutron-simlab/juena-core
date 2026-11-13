@@ -1,8 +1,8 @@
 """Domain-neutral interrupt and execution-evidence schemas.
 
-Applications add their own interrupt arms and compose their own discriminated
-resume union. In particular, sandbox execution approval remains owned by
-``juena-chatbot`` rather than leaking into this package.
+Applications add their own interrupt kinds and compose their own resume union:
+one model per kind, told apart by its ``kind`` field. Sandbox execution
+approval, for example, belongs to the application, not to this package.
 """
 
 from __future__ import annotations

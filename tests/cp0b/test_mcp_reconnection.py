@@ -1,8 +1,9 @@
-"""CP0b, row 3: a tool call succeeds after the MCP server restarts, without
-rebuilding the agent. VITESS execution is a long-lived internal Compose
-service; if a redeploy meant every discovered tool went stale, the app would
-need to rebuild its agent graph on every MCP restart. It does not have to:
-each discovered tool reopens its own connection per call.
+"""A discovered tool still succeeds after the MCP server restarts, without
+rediscovering it.
+
+Each discovered tool reopens its own connection per call, so an application
+does not need to rebuild its agent graph when a long-lived MCP service is
+redeployed.
 """
 
 import pytest

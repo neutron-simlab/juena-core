@@ -27,16 +27,44 @@ __all__ = ["RunControl", "RunRegistry", "control_from"]
 
 @dataclass
 class Instruction:
+    """One steering instruction sent to a live run.
+
+    Attributes:
+        id: The client's id for the instruction, which makes retries safe.
+        text: The instruction text.
+        recipients: The agents (name and namespace) that have received it.
+    """
+
     id: str
     text: str
     recipients: set[str] = field(default_factory=set)
 
     def status(self, *, final: bool) -> str:
+        """Return the instruction's delivery status.
+
+        Args:
+            final: Whether the run has ended.
+
+        Returns:
+            ``applied`` once any agent received it; otherwise ``not_applied``
+            after the run ends, or ``received`` while it runs.
+        """
+
         if self.recipients:
             return "applied"
         return "not_applied" if final else "received"
 
     def message(self, run_id: str, *, final: bool = False) -> HumanMessage:
+        """Build the human message that carries this instruction.
+
+        Args:
+            run_id: The run the instruction belongs to.
+            final: Whether the run has ended, which decides the status.
+
+        Returns:
+            A human message with the steering details in ``additional_kwargs``.
+        """
+
         return HumanMessage(
             id=f"steering:{run_id}:{self.id}",
             content=self.text,
@@ -59,6 +87,15 @@ class RunControl:
     """
 
     def __init__(self, *, thread_id: str, user_id: str) -> None:
+        """Initialize a run in the ``running`` state.
+
+        Call it inside the event loop: it records the running loop.
+
+        Args:
+            thread_id: The conversation thread.
+            user_id: The caller's id.
+        """
+
         self.id = str(uuid4())
         self.thread_id, self.user_id = thread_id, user_id
         self.state = "running"
@@ -79,6 +116,13 @@ class RunControl:
         self.finished_at: float | None = None
 
     def snapshot(self) -> dict[str, Any]:
+        """Describe the run for the client.
+
+        Returns:
+            The run's id, thread, state, error, and its instructions with their
+            status.
+        """
+
         with self.lock:
             return {
                 "type": "run",
@@ -98,11 +142,25 @@ class RunControl:
             }
 
     def emit(self) -> None:
+        """Send a snapshot to the client, if one is listening; safe from any thread."""
+
         if self.notify is not None:
             self.loop.call_soon_threadsafe(self.notify, self.snapshot())
 
     def steer(self, instruction_id: str, text: str) -> dict[str, Any]:
-        """Accept a correction once; retries cannot change its meaning."""
+        """Accept a correction once; retries cannot change its meaning.
+
+        Args:
+            instruction_id: The client's id for the instruction.
+            text: The instruction text.
+
+        Returns:
+            The run's snapshot.
+
+        Raises:
+            ValueError: The id was already used for different text, or the run
+                no longer accepts instructions.
+        """
         with self.lock:
             existing = self.instructions.get(instruction_id)
             if existing is not None:
@@ -133,11 +191,26 @@ class RunControl:
             self.emit()
 
     def check(self) -> None:
+        """Stop the caller if the run was stopped.
+
+        Raises:
+            asyncio.CancelledError: The run was stopped.
+        """
+
         if self.cancelled.is_set():
             raise asyncio.CancelledError
 
     @contextmanager
     def operation(self):
+        """Count one operation that finalization must wait for.
+
+        Yields:
+            None, once the operation is counted.
+
+        Raises:
+            asyncio.CancelledError: The run was already stopped.
+        """
+
         # Register before admission, including admission that is blocked in a
         # synchronous database call. Finalization waits for these operations.
         with self.lock:
@@ -152,6 +225,16 @@ class RunControl:
     def messages(
         self, seen: set[str] = frozenset(), *, final: bool = False
     ) -> list[HumanMessage]:
+        """Build messages for the instructions not yet seen.
+
+        Args:
+            seen: Instruction ids to leave out.
+            final: Whether the run has ended, which decides each status.
+
+        Returns:
+            One human message per instruction.
+        """
+
         with self.lock:
             return [
                 item.message(self.id, final=final)
@@ -160,6 +243,13 @@ class RunControl:
             ]
 
     def applied(self, ids: set[str], recipient: str) -> None:
+        """Record that a recipient received these instructions.
+
+        Args:
+            ids: Instruction ids.
+            recipient: The agent that received them.
+        """
+
         with self.lock:
             for key in ids:
                 item = self.instructions.get(key)
@@ -174,6 +264,13 @@ class RunControl:
                     self.emit()
 
     def finish(self, state: str, error: str | None = None) -> None:
+        """Record the run's final state and tell the client.
+
+        Args:
+            state: The final state, such as ``completed`` or ``failed``.
+            error: A message for the client, if the run failed.
+        """
+
         with self.lock:
             self.state, self.error = state, error
             self.finished_at = monotonic()
@@ -181,6 +278,15 @@ class RunControl:
             logger.info("Run finished run=%s state=%s", self.id, state)
 
     def observe(self, payload: dict) -> None:
+        """Note a failure, or the answer text streamed so far.
+
+        The partial answer is kept so a stopped run can save what the user
+        already saw.
+
+        Args:
+            payload: One stream payload.
+        """
+
         if payload.get("type") == "error":
             self.failure = "The response failed"
         elif payload.get("type") == "token":
@@ -196,6 +302,9 @@ class RunControl:
 
         A history-write failure is reported but does not imply that a container
         remains alive. Only unconfirmed execution cleanup retains the lease.
+
+        Args:
+            completed: Whether the run's event source finished on its own.
         """
         with self.lock:
             if not completed:
@@ -236,10 +345,27 @@ class RunControl:
 
 
 class RunRegistry:
+    """The live and recently finished runs of one API process."""
+
     def __init__(self) -> None:
+        """Initialize an empty registry."""
+
         self.runs: OrderedDict[str, RunControl] = OrderedDict()
 
     def create(self, *, thread_id: str, user_id: str) -> RunControl:
+        """Register a new run.
+
+        Finished runs are dropped after an hour, or sooner once 256 or more
+        runs are held.
+
+        Args:
+            thread_id: The conversation thread.
+            user_id: The caller's id.
+
+        Returns:
+            The new run's control.
+        """
+
         now = monotonic()
         for key, run in list(self.runs.items()):
             if run.finished_at is not None and (
@@ -251,6 +377,17 @@ class RunRegistry:
         return run
 
     def get(self, run_id: str, thread_id: str, user_id: str) -> RunControl | None:
+        """Find a run, but only for its own thread and user.
+
+        Args:
+            run_id: The run's id.
+            thread_id: The thread the run must belong to.
+            user_id: The user the run must belong to.
+
+        Returns:
+            The run's control, or None when it is unknown or not theirs.
+        """
+
         run = self.runs.get(run_id)
         return (
             run
@@ -260,6 +397,15 @@ class RunRegistry:
 
 
 def control_from(context: Any) -> RunControl | None:
+    """Return the run control carried in a runtime context, if any.
+
+    Args:
+        context: A runtime context: a dataclass or a plain dict.
+
+    Returns:
+        The context's ``control``, or None.
+    """
+
     return (
         context.get("control")
         if isinstance(context, dict)
@@ -336,7 +482,7 @@ async def _save_delivery(control: RunControl, updates: dict) -> None:
     retain the checkpoint identity, scheduling channels and interrupt writes.
     New channel versions keep earlier checkpoints' message blobs unchanged.
     The foreground lease is still held, so no graph can execute or write here
-    concurrently. This boundary is tested with both memory and Postgres savers.
+    concurrently.
     """
     saver = control.agent.checkpointer
     saved = await saver.aget_tuple(control.config)

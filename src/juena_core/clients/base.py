@@ -1,23 +1,21 @@
-"""The synchronous HTTP client for the routes core serves.
+"""The HTTP client for the routes core serves.
 
-Split out of ``juena/clients/client.py`` (00-BOUNDARY.md, decision 10). The
-application's ``AgentClient`` calls ``/auth/me`` and ``/research``, neither of
-which is a core route, so core gets only :class:`BaseAgentClient`: transport,
-SSE parsing, and one method per route :func:`juena_core.server.service.create_app`
-actually serves. Each application subclasses it and adds its own.
+:class:`BaseAgentClient` holds the transport, SSE parsing (SSE, server-sent
+events, is how the server streams a reply) and one method per route
+:func:`juena_core.server.service.create_app` serves. Each application
+subclasses it and adds methods for its own routes.
 
-**Synchronous on purpose.** Streamlit consumes it from a script run, and
-``stream``/``resume_stream`` are ordinary generators. An async client would
-have to be driven by an event loop the page does not have.
+Synchronous by default: Streamlit calls it from a script run, which has no
+event loop, so ``stream`` and ``resume_stream`` are ordinary generators.
+``astream`` and ``aresume_stream`` are async versions for callers that have
+an event loop; each opens its own connection.
 
-Two shapes here are deliberately open, because core does not know every event
-or every interrupt an application will define:
+Two parts stay open, because core does not know every event or every
+interrupt an application will define:
 
 ``_parse_sse_data``
-    Core understands its own wire vocabulary and **passes anything else
-    through unchanged**, so an application-specific event reaches that
-    application's UI intact. The source flattened unknown frames to
-    ``{"type": "unknown", "content": str(payload)}``, which destroyed them.
+    Understands core's own event types and passes anything else through
+    unchanged, so an application's own event reaches its UI intact.
 
 ``resume_stream``
     Takes the interrupt ``kind`` as an argument rather than naming one.
@@ -50,10 +48,8 @@ class AgentClientError(Exception):
 class AgentAuthenticationError(AgentClientError):
     """The API rejected the client's user session.
 
-    Raised for every ``401``, not just the one route that checked for it in
-    the source. A caller needs to tell "your session expired, sign in again"
-    from "the server is broken", and that distinction is the same on every
-    route.
+    Raised for every ``401``, so a caller can tell "your session expired, sign
+    in again" from "the server is broken" on any route.
     """
 
 
@@ -93,12 +89,9 @@ def _raise_http_error(exc: httpx.HTTPError) -> NoReturn:
 class BaseAgentClient:
     """Client for the routes core serves.
 
-    Owns ``health``, ``list_chats``, ``create_chat``, ``get_chat``,
-    ``update_chat``, ``stream``, ``resume_stream``, ``get_artifact``,
-    ``get_pending_interrupt`` and ``delete_thread``. It does **not** own
-    ``get_current_user`` (``/auth/me``) or ``list_research`` (``/research``):
-    those routes belong to an application, and a client method with no route
-    behind it is a promise core cannot keep.
+    Methods for routes an application adds belong in that application's
+    subclass: a client method with no route behind it is a promise core
+    cannot keep.
     """
 
     def __init__(
@@ -108,7 +101,8 @@ class BaseAgentClient:
         timeout: float | None = None,
         session_token: str | None = None,
     ) -> None:
-        """
+        """Initialize the client.
+
         Args:
             base_url: Base URL of the agent service.
             agent: The agent id this client streams to.
@@ -134,7 +128,11 @@ class BaseAgentClient:
         self.close()
 
     def health(self) -> bool:
-        """Return whether the API health endpoint is reachable."""
+        """Return whether the API health endpoint is reachable.
+
+        Returns:
+            Whether ``/health`` answered 200 within two seconds.
+        """
         try:
             response = self._client.get(f"{self.base_url}/health", timeout=2.0)
             return response.status_code == 200
@@ -228,15 +226,74 @@ class BaseAgentClient:
         return response
 
     def list_files(self, thread_id: str, path: str = "/", *, hidden: bool = False, offset: int = 0):
+        """List one page of a directory in the conversation's files.
+
+        Args:
+            thread_id: The conversation.
+            path: Directory to list.
+            hidden: Whether to include names that start with a dot.
+            offset: Index of the first entry to return.
+
+        Returns:
+            The server's page: ``path``, ``entries`` and ``next_offset``.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure.
+        """
         return self._filesystem_request("GET", thread_id, params={"path": path, "hidden": hidden, "offset": offset}).json()
 
     def read_file(self, thread_id: str, path: str):
+        """Load a preview of one conversation file.
+
+        Args:
+            thread_id: The conversation.
+            path: The file.
+
+        Returns:
+            The server's preview, including the text and the revision to pass
+            to :meth:`save_file`.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure.
+        """
         return self._filesystem_request("GET", thread_id, "/file", params={"path": path}).json()
 
     def download_file(self, thread_id: str, path: str) -> bytes:
+        """Download one conversation file.
+
+        Args:
+            thread_id: The conversation.
+            path: The file.
+
+        Returns:
+            The file's bytes.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure.
+        """
         return self._filesystem_request("GET", thread_id, "/download", params={"path": path}).content
 
     def save_file(self, thread_id: str, path: str, text: str, revision: str):
+        """Save edited text to a workspace file.
+
+        Args:
+            thread_id: The conversation.
+            path: The file.
+            text: The new content.
+            revision: The revision the edit started from; the server refuses
+                the save when the file has changed since.
+
+        Returns:
+            The path and the file's new revision.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure, including a changed
+                file.
+        """
         return self._filesystem_request("PUT", thread_id, "/file", json={
             "path": path, "text": text, "revision": revision,
         }).json()
@@ -250,6 +307,17 @@ class BaseAgentClient:
 
         ``agent_id`` narrows the list to one agent. Omitting it lists them
         all, which shows more rather than granting more.
+
+        Args:
+            limit: Most conversations to return.
+            agent_id: Agent to list conversations for; ``None`` means all.
+
+        Returns:
+            The conversations as dicts.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure or an invalid response.
         """
         params: dict[str, Any] = {"limit": limit}
         if agent_id is not None:
@@ -282,6 +350,18 @@ class BaseAgentClient:
         registered graph for its whole life, and the server has no default to
         fall back on: guessing here would create the row under the wrong
         graph, and every later request for that thread would answer 404.
+
+        Args:
+            thread_id: Id for the new conversation.
+            agent_id: Agent the conversation belongs to.
+            title: The conversation's title.
+
+        Returns:
+            The created conversation.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure.
         """
         try:
             response = self._client.post(
@@ -296,7 +376,19 @@ class BaseAgentClient:
         return response.json()
 
     def get_chat(self, thread_id: str, include_messages: bool = True) -> dict[str, Any] | None:
-        """Load an owned conversation, optionally without its message history."""
+        """Load an owned conversation, optionally without its message history.
+
+        Args:
+            thread_id: The conversation.
+            include_messages: Whether to include the message history.
+
+        Returns:
+            The conversation, or ``None`` when the server answers 404 or 410.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure.
+        """
         try:
             response = self._client.get(
                 f"{self.base_url}/chats/{thread_id}",
@@ -318,7 +410,20 @@ class BaseAgentClient:
         title: str | None = None,
         summary: str | None = None,
     ) -> dict[str, Any]:
-        """Update metadata on an owned conversation."""
+        """Update metadata on an owned conversation.
+
+        Args:
+            thread_id: The conversation.
+            title: New title; ``None`` leaves it unchanged.
+            summary: New summary; ``None`` leaves it unchanged.
+
+        Returns:
+            The updated conversation.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure.
+        """
         payload = {
             key: value
             for key, value in {"title": title, "summary": summary}.items()
@@ -343,19 +448,17 @@ class BaseAgentClient:
     def _parse_sse_data(self, data: str) -> ChatMessage | dict[str, Any] | None:
         """Parse one SSE ``data`` payload into a message or an event dict.
 
-        Core's own wire vocabulary is ``message``, ``error``, ``thread``,
+        Core's own event types are ``message``, ``error``, ``thread``,
         ``token``, ``status``, ``clarification_required``,
-        ``approval_required`` and ``artifact``. **Anything else is returned
-        as it arrived**, with its ``type`` intact.
-
-        That passthrough is what lets an application define its own event —
-        juena-chatbot's ``sandbox_status``, say — without core learning about
-        it, and it mirrors the server side, where
+        ``approval_required`` and ``artifact``. Anything else is returned as
+        it arrived, with its ``type`` intact, so an application can define its
+        own events without core knowing them. On the server side,
         :class:`~juena_core.server.streaming.processor.StreamPolicy` decides
         which custom events are forwarded at all.
 
-        Returns ``None`` only for payloads carrying nothing to render;
-        callers must skip those rather than treat them as end-of-stream.
+        Core's version never returns ``None``; a subclass may, for a payload
+        with nothing to render. Callers skip ``None`` rather than treat it as
+        the end of the stream.
         """
         try:
             parsed = json.loads(data)
@@ -506,6 +609,14 @@ class BaseAgentClient:
             provider: LLM provider to use for this turn.
             thread_id: Thread to continue, or ``None`` to start one.
             attachments: Files to stage for this turn.
+
+        Yields:
+            Each parsed frame of the response.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: No agent is selected, the request failed, or
+                the server sent an error or an invalid frame.
         """
         url, stream_kwargs = self._build_stream_request(
             message, model, provider, thread_id, attachments
@@ -532,6 +643,23 @@ class BaseAgentClient:
         Core names no kind but its own here. ``ask_user`` is core's, so
         ``clarification`` is; an approval belongs to whichever application
         registered it, under whatever name that application chose.
+
+        Args:
+            thread_id: The conversation.
+            interrupt_id: The pending interrupt being answered.
+            kind: The interrupt kind, such as ``"clarification"``.
+            model: LLM model to use for the rest of the turn.
+            provider: LLM provider to use for the rest of the turn.
+            **fields: The answer fields for this kind; ``None`` values are
+                left out.
+
+        Yields:
+            Each parsed frame of the response.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: No agent is selected, the request failed, or
+                the server sent an error or an invalid frame.
         """
         url, kwargs = self._build_resume_request(
             thread_id=thread_id, interrupt_id=interrupt_id, kind=kind,
@@ -566,7 +694,23 @@ class BaseAgentClient:
         thread_id: str | None = None,
         attachments: Sequence[Any] | None = None,
     ) -> AsyncGenerator[ChatMessage | dict[str, Any], None]:
-        """Stream a turn without sharing the client's synchronous connection."""
+        """Stream a turn without sharing the client's synchronous connection.
+
+        Args:
+            message: The message to send to the agent.
+            model: LLM model to use for this turn.
+            provider: LLM provider to use for this turn.
+            thread_id: Thread to continue, or ``None`` to start one.
+            attachments: Files to stage for this turn.
+
+        Yields:
+            Each parsed frame of the response.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: No agent is selected, the request failed, or
+                the server sent an error or an invalid frame.
+        """
         url, kwargs = self._build_stream_request(
             message, model, provider, thread_id, attachments
         )
@@ -583,7 +727,25 @@ class BaseAgentClient:
         provider: str | Provider | None = None,
         **fields: Any,
     ) -> AsyncGenerator[ChatMessage | dict[str, Any], None]:
-        """Resume an interrupt on a connection owned by the calling event loop."""
+        """Resume an interrupt on a connection owned by the calling event loop.
+
+        Args:
+            thread_id: The conversation.
+            interrupt_id: The pending interrupt being answered.
+            kind: The interrupt kind, such as ``"clarification"``.
+            model: LLM model to use for the rest of the turn.
+            provider: LLM provider to use for the rest of the turn.
+            **fields: The answer fields for this kind; ``None`` values are
+                left out.
+
+        Yields:
+            Each parsed frame of the response.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: No agent is selected, the request failed, or
+                the server sent an error or an invalid frame.
+        """
         url, kwargs = self._build_resume_request(
             thread_id=thread_id,
             interrupt_id=interrupt_id,
@@ -630,6 +792,21 @@ class BaseAgentClient:
     def steer_run(
         self, thread_id: str, run_id: str, instruction_id: str, text: str
     ) -> dict:
+        """Send a correction to a running response.
+
+        Args:
+            thread_id: The conversation.
+            run_id: The running response.
+            instruction_id: Id for this correction.
+            text: The correction.
+
+        Returns:
+            The server's answer.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure.
+        """
         return self._run_control(
             thread_id,
             run_id,
@@ -638,6 +815,19 @@ class BaseAgentClient:
         )
 
     def stop_run(self, thread_id: str, run_id: str) -> dict:
+        """Ask the server to stop a running response.
+
+        Args:
+            thread_id: The conversation.
+            run_id: The running response.
+
+        Returns:
+            The server's answer.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure.
+        """
         return self._run_control(thread_id, run_id, "/stop")
 
     # ------------------------------------------------------------------
@@ -645,7 +835,18 @@ class BaseAgentClient:
     # ------------------------------------------------------------------
 
     def get_artifact(self, artifact_id: str) -> bytes:
-        """Download one generated file owned by the current user."""
+        """Download one generated file owned by the current user.
+
+        Args:
+            artifact_id: The file's id.
+
+        Returns:
+            The file's bytes.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure or an empty file.
+        """
         try:
             response = self._client.get(
                 f"{self.base_url}/artifacts/{artifact_id}",
@@ -671,6 +872,19 @@ class BaseAgentClient:
         The payload keeps its own ``type`` (``clarification_required`` or
         ``approval_required``), so callers dispatch on that rather than on
         which slot it arrived under.
+
+        Args:
+            thread_id: The conversation.
+            model: LLM model, sent along to the server.
+            provider: LLM provider, sent along to the server.
+
+        Returns:
+            The pending approval or question, or ``None``.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: No agent is selected, the request failed, or the
+                response was not JSON.
         """
         params = {
             key: value
@@ -702,7 +916,18 @@ class BaseAgentClient:
         return pending if isinstance(pending, dict) else None
 
     def delete_thread(self, thread_id: str) -> dict[str, Any]:
-        """Delete all persisted server-side state for a conversation thread."""
+        """Delete all persisted server-side state for a conversation thread.
+
+        Args:
+            thread_id: The conversation.
+
+        Returns:
+            The server's answer.
+
+        Raises:
+            AgentAuthenticationError: The session was rejected.
+            AgentClientError: Any other request failure.
+        """
         try:
             response = self._client.delete(
                 f"{self.base_url}/threads/{thread_id}",
@@ -719,7 +944,14 @@ class BaseAgentClient:
     # ------------------------------------------------------------------
 
     def is_token_message(self, message: ChatMessage | str | Mapping[str, Any]) -> bool:
-        """Whether a streamed frame is an incremental text chunk."""
+        """Whether a streamed frame is an incremental text chunk.
+
+        Args:
+            message: A frame from :meth:`stream`, or a plain string.
+
+        Returns:
+            Whether it is a string or a ``token`` event.
+        """
         if isinstance(message, str):
             return True  # Legacy string token
         if isinstance(message, Mapping):
@@ -727,7 +959,14 @@ class BaseAgentClient:
         return False
 
     def get_token_content(self, message: ChatMessage | str | Mapping[str, Any]) -> str | None:
-        """Return the text carried by a token frame, or ``None``."""
+        """Return the text carried by a token frame, or ``None``.
+
+        Args:
+            message: A frame from :meth:`stream`, or a plain string.
+
+        Returns:
+            The token text, or ``None`` for any other frame.
+        """
         if isinstance(message, str):
             return message  # Legacy string token
         if isinstance(message, Mapping) and self.is_token_message(message):

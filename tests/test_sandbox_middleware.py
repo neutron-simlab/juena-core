@@ -86,8 +86,8 @@ def test_approved_command_and_output_are_recorded(store) -> None:
 def test_many_approved_commands_leave_room_for_results(store) -> None:
     """Records are the application's bookkeeping and must not spend the user's budget.
 
-    Six approved commands used to write twelve records into a twelve-file
-    allowance, so the figure the turn was about had nowhere to go.
+    Six approved commands write twelve records. In a shared twelve-file
+    allowance, the figure the turn was about would have nowhere to go.
     """
     middleware = SandboxExecutionMiddleware()
     for index in range(6):
@@ -142,10 +142,10 @@ def test_a_command_with_nothing_queued_is_left_alone(store) -> None:
 
 
 def test_edited_command_is_what_gets_recorded(store) -> None:
-    """The case the old exact-text lookup could not handle.
+    """A command the human edited before approving is recorded as edited.
 
-    The human edited the command before approving, so `wrap_tool_call` receives
-    the edited text. Nothing is matched against the originally proposed command.
+    `wrap_tool_call` receives the edited text, and nothing is matched against
+    the originally proposed command.
     """
     middleware = SandboxExecutionMiddleware()
 
@@ -207,9 +207,8 @@ def test_unauthenticated_run_is_not_recorded(store) -> None:
 def test_a_failed_run_is_still_evidence_without_an_identity(store) -> None:
     """Audit records need a user id; proving what ran must not.
 
-    Gating both on the identity let a missing user id erase the record of a
-    failed command, which downstream reads as "nothing ran" -- fail-open on
-    exactly the path that has to fail closed.
+    Gating both on the identity would let a missing user id erase the record of
+    a failed command, which downstream reads as "nothing ran".
     """
     middleware = SandboxExecutionMiddleware()
     request = _request("python fails.py")
@@ -295,8 +294,7 @@ def test_execute_still_runs_where_the_tool_is_actually_bound(store) -> None:
     config of the graph that is running, and a subgraph does not inherit its
     parent's. So the condition this asserts -- a context with the invocation
     id, a config without it -- is the only condition ``execute`` ever runs
-    under in the running application, and the generous stand-in is why a
-    version that raised there passed the whole suite.
+    under in the running application.
 
     Built with the real producers: a real ``create_agent`` graph, the real
     middleware, and the real ``RuntimeModelContext`` the server builds.

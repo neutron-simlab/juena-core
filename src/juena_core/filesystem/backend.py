@@ -24,6 +24,15 @@ class ConversationBackend(BackendProtocol):
 
     def __init__(self, *, root: str = "/workspace", writable: bool = False,
                  directories_only: bool = False) -> None:
+        """Initialize the backend.
+
+        Args:
+            root: Conversation path this route serves, such as ``"/workspace"``
+                or ``"/inputs"``.
+            writable: Whether the agent may write and edit files.
+            directories_only: Whether the agent may only list directories;
+                reads, searches and downloads are refused.
+        """
         self.root, self.writable, self.directories_only = root, writable, directories_only
 
     def _resolve(self):
@@ -46,6 +55,16 @@ class ConversationBackend(BackendProtocol):
                 for k, v in entry.items() if k in {"path", "size", "is_dir", "modified_at", "line", "text"}}
 
     def ls(self, path: str) -> LsResult:
+        """List a directory, hidden files included.
+
+        Stops adding pages once about 1,000 entries are collected.
+
+        Args:
+            path: Directory, relative to this route.
+
+        Returns:
+            The entries with route-relative paths, or an error.
+        """
         try:
             files, runtime = self._resolve()
             with files.guard(shared=True):
@@ -61,6 +80,17 @@ class ConversationBackend(BackendProtocol):
             return LsResult(error=str(exc))
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        """Read a UTF-8 text file of at most 10 MB.
+
+        Args:
+            file_path: File, relative to this route.
+            offset: First line to read.
+            limit: Maximum number of lines to read.
+
+        Returns:
+            The requested lines, or an error for a binary, oversized or
+            unreadable file.
+        """
         if self.directories_only:
             return ReadResult(error="Delegate file inspection to a specialist; you can list workspace directories.")
         try:
@@ -92,6 +122,19 @@ class ConversationBackend(BackendProtocol):
             store.note_undelivered(user_id, thread_id, name, str(exc))
 
     def write(self, file_path: str, content: str) -> WriteResult:
+        """Create a new file.
+
+        A file under ``/workspace/outputs/`` is also offered to the user as a
+        chat artifact; when that is refused, the reason is queued for the model.
+
+        Args:
+            file_path: File, relative to this route.
+            content: Text to write.
+
+        Returns:
+            The write result, or an error for a read-only route, an existing
+            file or a failed write.
+        """
         if not self.writable:
             return WriteResult(error="This filesystem route is read-only")
         try:
@@ -106,6 +149,20 @@ class ConversationBackend(BackendProtocol):
             return WriteResult(error=str(exc))
 
     def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
+        """Replace text in an existing file.
+
+        Like :meth:`write`, an edited file under ``/workspace/outputs/`` is
+        offered to the user again.
+
+        Args:
+            file_path: File, relative to this route.
+            old_string: Text to replace.
+            new_string: Replacement text.
+            replace_all: Whether to replace every occurrence.
+
+        Returns:
+            The edit result with the number of replacements, or an error.
+        """
         if not self.writable:
             return EditResult(error="This filesystem route is read-only")
         try:
@@ -125,6 +182,16 @@ class ConversationBackend(BackendProtocol):
             return EditResult(error=str(exc))
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """Find files whose path matches a glob pattern.
+
+        Args:
+            pattern: Glob pattern.
+            path: Directory to search; ``None`` means the whole route.
+
+        Returns:
+            The matches, marked truncated when the search stopped after
+            10,000 entries.
+        """
         try:
             pending, matches, visited = [path or "/"], [], 0
             while pending and visited < 10000:
@@ -142,6 +209,17 @@ class ConversationBackend(BackendProtocol):
             return GlobResult(error=str(exc))
 
     def grep(self, pattern: str, path: str | None = None, glob: str | None = None) -> GrepResult:
+        """Search text files for lines containing a literal string.
+
+        Args:
+            pattern: Text to look for, matched exactly (not as a regular
+                expression).
+            path: File or directory to search; ``None`` means the whole route.
+            glob: Glob pattern that limits which files are searched.
+
+        Returns:
+            Up to 200 matching lines, or an error.
+        """
         if self.directories_only:
             return GrepResult(error="Delegate file inspection to a specialist")
         try:
@@ -170,6 +248,14 @@ class ConversationBackend(BackendProtocol):
         return GrepResult(matches=matches, error=listing.error, truncated=listing.truncated)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        """Create each file as UTF-8 text, as :meth:`write` does.
+
+        Args:
+            files: ``(path, content)`` pairs.
+
+        Returns:
+            One response per file, with an error when it was not written.
+        """
         results = []
         for path, content in files:
             try:
@@ -180,6 +266,14 @@ class ConversationBackend(BackendProtocol):
         return results
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Read each file's bytes, up to 10 MB per file.
+
+        Args:
+            paths: Files, relative to this route.
+
+        Returns:
+            One response per path, with the content or an error.
+        """
         if self.directories_only:
             return [FileDownloadResponse(path=p, error="permission_denied") for p in paths]
         results = []

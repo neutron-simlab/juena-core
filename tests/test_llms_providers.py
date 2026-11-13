@@ -1,4 +1,4 @@
-"""CP1 tests for provider discovery and model construction."""
+"""Tests for provider discovery and model construction."""
 
 from __future__ import annotations
 
