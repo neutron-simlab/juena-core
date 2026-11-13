@@ -6,10 +6,9 @@ settings variant receive ``settings_factory`` and call it -- importing a
 ``conftest`` module directly is ambiguous once a nested suite has its own
 ``conftest.py``.
 
-Four other modules still define their own ``make_settings`` with different
-defaults (a DEBUG log level, a real database DSN, populated API keys). Those
-differences are what those tests are about, so they were left alone rather
-than folded into one helper with four flags.
+Four other modules define their own ``make_settings`` with different defaults
+(a DEBUG log level, a real database DSN, populated API keys), because those
+defaults are what their tests are about.
 """
 
 from __future__ import annotations

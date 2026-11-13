@@ -1,4 +1,4 @@
-"""CP4's routes, through a real application against a real Postgres.
+"""Core's routes, through a real application against a real Postgres.
 
 Requires the throwaway database:
 ``docker compose -f tests/compose.postgres.yml up -d --wait``

@@ -76,9 +76,8 @@ async def test_the_supervisor_may_read_findings_but_never_write_them() -> None:
 
     `BackendProtocol` implements every `a*` method as
     `asyncio.to_thread(self.<sync>, ...)`, so guarding the plain method guards
-    both -- which is why only the plain pair is overridden here. Asserted rather
-    than assumed: the async path is the one the server actually takes, and an
-    earlier bug in `FindingsStateBackend` lived only there.
+    both, and only the plain pair is overridden. The async path is asserted
+    anyway, because it is the one the server takes.
     """
     backend = ReadOnlyFindingsStateBackend()
 
@@ -90,13 +89,13 @@ async def test_the_supervisor_may_read_findings_but_never_write_them() -> None:
 
 @pytest.mark.asyncio
 async def test_the_supervisor_can_reason_over_a_finding_a_specialist_left() -> None:
-    """`/findings/` was in the supervisor's state all along, just unreadable.
+    """The supervisor can list, read and search the findings a specialist hands back.
 
-    A specialist's `files` merge into the parent when its delegation returns, so
-    the evidence arrives on its own -- but `SupervisorStateBackend` refuses every
-    path outside `/memories/`, so the supervisor could not open what it had been
-    handed. It could not check that a claimed finding existed, nor reconcile two
-    reports without delegating a third time.
+    A specialist's `files` merge into the parent when its delegation returns,
+    but `SupervisorStateBackend` refuses every path outside `/memories/`, so
+    `/findings/` needs its own read-only route. Without it the supervisor could
+    not check that a claimed finding exists, nor reconcile two reports without
+    delegating a third time.
 
     Driven with `ainvoke`, and the stored key is asserted unchanged: the route
     strips `/findings/` before delegating, so a backend that does not put it back
@@ -312,7 +311,7 @@ def test_specialist_backend_reads_staged_inputs_inside_graph(tmp_path: Path) -> 
 
 
 def test_summarization_can_park_evicted_turns_and_read_them_back() -> None:
-    """The supervisor's evicted history had nowhere to go, so it was dropped.
+    """Summarization can write the turns it evicts and read them back.
 
     `SupervisorStateBackend` refuses every path outside `/memories/` -- right for
     domain files, wrong for the one file summarization writes and then points the

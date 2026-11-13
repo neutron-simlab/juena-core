@@ -32,9 +32,8 @@ __all__ = [
     "validate_findings",
 ]
 
-#: What the graph's `files` channel and the `research_jobs.findings` column
-#: actually hold. Deep Agents stores `FileData`, not plain strings -- the column
-#: was annotated `dict[str, str]` for a while and the annotation was simply wrong.
+#: What the graph's `files` channel, and an application's database column that
+#: saves findings, actually hold: Deep Agents stores `FileData`, not plain strings.
 FindingsMap = dict[str, FileData]
 
 #: The only paths that may cross into a specialist. Everything else in the
@@ -49,7 +48,14 @@ CONFLICT_PREFIX = f"{FINDINGS_PREFIX}_conflicts/"
 
 
 def is_conflict_path(path: str) -> bool:
-    """Whether a path lies in the reserved conflict namespace."""
+    """Whether a path lies in the reserved conflict namespace.
+
+    Args:
+        path: The path to check.
+
+    Returns:
+        Whether it is under ``/findings/_conflicts/``.
+    """
     return path.startswith(CONFLICT_PREFIX)
 
 
@@ -59,12 +65,26 @@ def conflict_path(path: str, job_id: Any) -> str:
     Deterministic on ``(path, job_id)``, which is what makes collection safe to
     retry: replaying the same job writes the same key rather than accumulating
     ``survey-2.md``, ``survey-3.md``.
+
+    Args:
+        path: The finding's path under ``/findings/``.
+        job_id: The background job that produced this version.
+
+    Returns:
+        ``/findings/_conflicts/<job_id>/<rest of path>``.
     """
     return f"{CONFLICT_PREFIX}{job_id}/{path[len(FINDINGS_PREFIX):]}"
 
 
 def crossing_files(files: Mapping[str, Any] | None) -> dict[str, Any]:
-    """The staged inputs and findings a specialist is allowed to receive."""
+    """The staged inputs and findings a specialist is allowed to receive.
+
+    Args:
+        files: The supervisor's ``files`` channel.
+
+    Returns:
+        Only the entries under ``/inputs/`` and ``/findings/``.
+    """
     return {
         path: data
         for path, data in (files or {}).items()
@@ -82,6 +102,13 @@ def findings_delta(
     prefix filter over its result returns that whole snapshot back. Collecting
     it would rewrite every finding with a copy the job never touched, quietly
     reverting anything edited while the job ran.
+
+    Args:
+        before: The files the run started with.
+        after: The files the run ended with.
+
+    Returns:
+        The findings that are new or differ from ``before``.
     """
     seeded = before or {}
     return {
@@ -96,6 +123,12 @@ def fingerprint(files: Mapping[str, Any] | None) -> dict[str, str]:
 
     Content rather than a hash: findings are short, and storing the text means a
     conflict can be explained without a second lookup.
+
+    Args:
+        files: The files the job was seeded with.
+
+    Returns:
+        Each finding's path mapped to its text.
     """
     return {
         path: str((data or {}).get("content", ""))
@@ -117,6 +150,12 @@ def validate_findings(value: Any) -> FindingsMap:
     So the path is checked as strictly as the shape: `/findings/`, and never the
     reserved conflict namespace, which only the collection boundary may fill.
     Entries failing either check are dropped rather than merged.
+
+    Args:
+        value: The column's value as loaded.
+
+    Returns:
+        The valid entries; an empty map when ``value`` is not a mapping.
     """
     if not isinstance(value, Mapping):
         return {}

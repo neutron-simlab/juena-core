@@ -1,4 +1,4 @@
-"""Executable contracts for the synchronous CP5 HTTP client."""
+"""Executable contracts for the synchronous HTTP client."""
 
 from __future__ import annotations
 
@@ -334,9 +334,7 @@ def test_sse_parser_rejects_non_object_frames(client: BaseAgentClient) -> None:
 
 
 # ----------------------------------------------------------------------
-# Moved here from juena-chatbot's ``test_agent_client.py`` in plan 02/step 3.
-# Each of these drives a route or a parser that ``BaseAgentClient`` owns; the
-# two that stayed behind are the ones with a JüNA route behind them.
+# Routes and parsers that ``BaseAgentClient`` owns.
 # ----------------------------------------------------------------------
 
 
@@ -373,10 +371,9 @@ def test_session_cookie_replaces_shared_auth_secret(
 ) -> None:
     """A browser session is the only credential the client sends.
 
-    An earlier generation of this client put a process-wide ``AUTH_SECRET``
-    bearer token on every request, which authenticated the *deployment* rather
-    than the person using it. The environment variable is set here so the
-    assertion fails if anything ever reads it again.
+    A process-wide ``AUTH_SECRET`` bearer token would authenticate the
+    deployment rather than the person using it. The environment variable is
+    set here so the assertion fails if anything reads it.
     """
     monkeypatch.setenv("AUTH_SECRET", "must-not-be-used")
     client = BaseAgentClient(
@@ -404,11 +401,9 @@ def test_sse_parser_preserves_approval_choices_and_artifact_bytes(
 ) -> None:
     """Two frames whose *contents* the UI acts on, not just their type.
 
-    ``test_sse_parser_preserves_unknown_application_events`` shows the parser
-    keeps a frame it has never heard of. These two are frames core does define,
-    and they are the ones where dropping a key is silently destructive: without
-    ``allowed_decisions`` an approval card renders no buttons, and without
-    ``content_base64`` an artifact arrives empty.
+    These are frames core defines, and dropping a key from either is silently
+    destructive: without ``allowed_decisions`` an approval card renders no
+    buttons, and without ``content_base64`` an artifact arrives empty.
     """
     approval = client._parse_sse_data(
         '{"type":"approval_required","interrupt_id":"i-1","command":"python x.py",'

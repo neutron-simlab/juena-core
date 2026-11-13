@@ -1,5 +1,5 @@
 """The agent kit: ask_user, loop guard, findings, delegation, specialist
-backends, and the verified-report contract. See 00-BOUNDARY.md."""
+backends, and the verified-report contract."""
 
 from __future__ import annotations
 

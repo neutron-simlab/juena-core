@@ -1,12 +1,11 @@
-"""The identity seam: who a request belongs to, and who owns a thread.
+"""Identity: who a request belongs to, and who owns a thread.
 
-Core defines the *shape* of an authenticated caller and the session storage
-behind it. It does not define how anyone authenticates. An application passes
-a dependency that returns a :class:`Principal`; juena-chatbot passes one
-backed by SAML, and an application with no identity provider passes
-:func:`local_principal`.
+Core defines the shape of an authenticated caller and the session storage
+behind it. It does not define how anyone signs in. An application passes a
+dependency that returns a :class:`Principal`: one backed by its identity
+provider (such as SAML), or :func:`local_principal` if it has none.
 
-Core's own code touches only ``Principal.id``, which is what reaches
+Core's own code uses only ``Principal.id``, which becomes
 ``RuntimeModelContext.user_id`` and every ``user_id`` foreign key.
 """
 
@@ -20,7 +19,7 @@ from datetime import timedelta
 from uuid import UUID
 
 from fastapi import Cookie, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from juena_core.config import settings
@@ -59,12 +58,18 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 @dataclass(frozen=True, slots=True)
 class Principal:
-    """One authenticated caller, however the application authenticated them."""
+    """One authenticated caller, however the application authenticated them.
+
+    Attributes:
+        id: The caller's ``users`` row id, the only field core itself uses.
+        subject: Opaque within ``issuer``, such as a SAML NameID.
+        issuer: Opaque identity-provider id, such as a SAML entity id.
+        email: The caller's email address, if known.
+        display_name: The name to show, if known.
+    """
 
     id: UUID
-    #: Opaque within ``issuer``; a SAML NameID in juena-chatbot.
     subject: str
-    #: Opaque identity-provider id; a SAML entity id in juena-chatbot.
     issuer: str
     email: str | None
     display_name: str | None
@@ -76,6 +81,15 @@ PrincipalDependency = Callable[..., Awaitable[Principal] | Principal]
 
 
 def hash_session_token(token: str) -> str:
+    """Hash a session token for storage and lookup.
+
+    Args:
+        token: The token from the session cookie.
+
+    Returns:
+        The token's SHA-256 hex digest.
+    """
+
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
@@ -100,8 +114,18 @@ async def upsert_principal(
     """Record a caller's identity provider details, creating the row if new.
 
     Takes the fields rather than an identity object, because the object that
-    carries them is the application's: a SAML assertion in juena-chatbot, and
+    carries them is the application's: a SAML assertion, for example, or
     nothing at all where :func:`local_principal` is used.
+
+    Args:
+        session: The database session. Changes are flushed, not committed.
+        subject: The caller's id within the issuer.
+        issuer: The identity provider's id.
+        email: The caller's email address, if known.
+        display_name: The name to show, if known.
+
+    Returns:
+        The caller as a :class:`Principal`.
     """
 
     result = await session.execute(
@@ -128,10 +152,21 @@ async def upsert_principal(
 
 
 async def create_auth_session(session: AsyncSession, principal: Principal) -> str:
-    """Issue one session token and store only its hash."""
+    """Issue one session token and store only its hash.
+
+    Args:
+        session: The database session. Changes are flushed, not committed.
+        principal: The caller the session is for.
+
+    Returns:
+        The new token, to put in the session cookie.
+    """
 
     token = secrets.token_urlsafe(32)
     now = utc_now()
+    # Nothing else removes a session row. An expired one can never
+    # authenticate again, so each sign-in clears them out.
+    await session.execute(delete(AuthSession).where(AuthSession.expires_at <= now))
     session.add(
         AuthSession(
             token_hash=hash_session_token(token),
@@ -150,6 +185,13 @@ async def revoke_sessions_for_subject(session: AsyncSession, subject: str) -> in
 
     Used by provider-initiated single logout, where the application is told
     who to sign out but never sees their cookie.
+
+    Args:
+        session: The database session. Changes are flushed, not committed.
+        subject: The subject to sign out.
+
+    Returns:
+        How many sessions were revoked.
     """
 
     now = utc_now()
@@ -172,6 +214,13 @@ async def revoke_sessions_for_subject(session: AsyncSession, subject: str) -> in
 
 
 async def revoke_auth_session(session: AsyncSession, token: str) -> None:
+    """Revoke the session a token belongs to, unless it is already revoked.
+
+    Args:
+        session: The database session. Changes are flushed, not committed.
+        token: The token from the session cookie.
+    """
+
     result = await session.execute(
         select(AuthSession).where(AuthSession.token_hash == hash_session_token(token))
     )
@@ -185,7 +234,21 @@ async def session_principal(
     session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     session: AsyncSession = Depends(get_db_session),
 ) -> Principal:
-    """Resolve the session cookie to a principal, or refuse the request."""
+    """Resolve the session cookie to a principal, or refuse the request.
+
+    A FastAPI dependency. It also records when the session was last used.
+
+    Args:
+        session_token: The session cookie's value.
+        session: The database session.
+
+    Returns:
+        The signed-in caller.
+
+    Raises:
+        HTTPException: 401 when the cookie is missing, or its session is
+            unknown, revoked, expired or belongs to an inactive user.
+    """
 
     if not session_token:
         raise HTTPException(
@@ -222,20 +285,28 @@ def local_principal(
     email: str | None = None,
     display_name: str | None = None,
 ) -> PrincipalDependency:
-    """A dependency returning one fixed principal, for a single-user deployment.
+    """Return a dependency with one fixed principal, for a single-user deployment.
 
-    The ``user_id`` is supplied by the application and must be stable across
-    restarts: it is the ``users`` row, the owner of every thread, and the
-    memory namespace. A value generated per process would orphan yesterday's
-    conversations.
+    It goes exactly where a real provider's dependency would, so adding a real
+    sign-in later replaces this callable without changing any route.
 
-    This is injected exactly where a real provider's dependency would go, so
-    adopting an institute login later replaces this callable rather than
-    rewriting any route.
+    Args:
+        user_id: Supplied by the application and stable across restarts: it is
+            the ``users`` row, the owner of every thread, and the memory
+            namespace. A value generated per process would orphan yesterday's
+            conversations.
+        subject: The principal's subject.
+        issuer: The principal's issuer.
+        email: The principal's email address, if any.
+        display_name: The name to show, if any.
 
-    Refuses to construct when the API is published (see
-    :func:`refuse_published_api`) — an identity provider that authenticates
-    nobody must never face a network.
+    Returns:
+        A dependency that always returns the same principal.
+
+    Raises:
+        RuntimeError: The API is published (see :func:`refuse_published_api`):
+            a provider that lets everyone in must never be reachable from the
+            network.
     """
 
     principal = Principal(
@@ -255,7 +326,14 @@ def local_principal(
 
 
 def fixed_principal(dependency: PrincipalDependency) -> Principal | None:
-    """The principal behind a fixed dependency, or ``None`` for a real provider."""
+    """Return the principal behind a fixed dependency.
+
+    Args:
+        dependency: An identity dependency.
+
+    Returns:
+        The fixed principal, or ``None`` for a real provider.
+    """
 
     return getattr(dependency, _FIXED_PRINCIPAL_ATTR, None)
 
@@ -267,6 +345,13 @@ def refuse_published_api(dependency: PrincipalDependency) -> None:
     ``create_app`` — rather than from a dependency, because a dependency runs
     on a request: it would fail the first call rather than refuse to boot, and
     by then the port is already open.
+
+    Args:
+        dependency: The identity dependency. Only a fixed principal is checked.
+
+    Raises:
+        RuntimeError: ``API_PUBLISHED`` is true, or ``BIND_HOST`` is not a
+            loopback address.
     """
 
     if fixed_principal(dependency) is None:
@@ -288,11 +373,18 @@ def refuse_published_api(dependency: PrincipalDependency) -> None:
 async def ensure_principal_row(principal: Principal) -> None:
     """Create the ``users`` row a fixed principal only claims to have.
 
-    A real identity provider writes this row as a side effect of signing
-    somebody in. A fixed principal has no sign-in to hang it on, so the write
-    happens at startup instead — inside ``database_lifespan``, which owns the
-    session factory, and before the application serves. Without it the first
-    conversation fails on ``chats.user_id``'s foreign key.
+    A real identity provider writes this row when somebody signs in. A fixed
+    principal never signs in, so the row is written at startup, before the
+    application serves; without it the first conversation fails on the
+    ``chats.user_id`` foreign key. Call it inside ``database_lifespan``, which
+    owns the session factory.
+
+    Args:
+        principal: The fixed principal.
+
+    Raises:
+        RuntimeError: A row with this issuer and subject already exists under
+            a different id.
     """
 
     factory = get_session_factory()

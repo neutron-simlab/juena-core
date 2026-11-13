@@ -47,6 +47,14 @@ FILE_MODE = 0o660
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceFileResult:
+    """The outcome for one file of an upload or download.
+
+    Attributes:
+        path: The file's path.
+        content: The bytes read, for a successful download.
+        error: Why the file failed, or ``None``.
+    """
+
     path: str
     content: bytes | None = None
     error: str | None = None
@@ -54,7 +62,13 @@ class WorkspaceFileResult:
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceArtifactScan:
-    """Accepted outputs plus a bounded account of files the worker refused."""
+    """Accepted outputs plus a bounded account of files the worker refused.
+
+    Attributes:
+        accepted: Accepted files, relative to the outputs directory.
+        dropped: ``(name, reason)`` for refused files, up to a cap.
+        omitted_drops: How many refused files went past the cap.
+    """
 
     accepted: tuple[str, ...] = ()
     dropped: tuple[tuple[str, str], ...] = ()
@@ -62,11 +76,25 @@ class WorkspaceArtifactScan:
 
 
 class WorkspaceOwnershipError(RuntimeError):
+    """A workspace belongs to another user, or its owner marker is invalid."""
+
     pass
 
 
 def assert_safe_path(path: str, message: str = "invalid_path") -> PurePosixPath:
-    """Reject anything that is not a plain absolute path inside the sandbox."""
+    """Reject anything that is not a plain absolute path inside the sandbox.
+
+    Args:
+        path: The path to check.
+        message: Error message when the path is refused.
+
+    Returns:
+        The path as a ``PurePosixPath``.
+
+    Raises:
+        ValueError: The path is relative, or contains ``..``, ``~``, a
+            backslash or a null byte.
+    """
 
     posix = PurePosixPath(path)
     if not path.startswith("/") or path.startswith("//") or "\x00" in path or "\\" in path or ".." in posix.parts or "~" in posix.parts:
@@ -75,6 +103,8 @@ def assert_safe_path(path: str, message: str = "invalid_path") -> PurePosixPath:
 
 
 class WorkspaceStore:
+    """Conversation workspaces on disk, with locks, a size quota and expiring scratch."""
+
     def __init__(
         self,
         root: Path,
@@ -82,19 +112,55 @@ class WorkspaceStore:
         limit_bytes: int = 5 * 1024**3,
         idle_ttl_seconds: int = 24 * 3600,
     ) -> None:
+        """Initialize the store.
+
+        Args:
+            root: Directory that holds every workspace.
+            limit_bytes: Most bytes one workspace may hold.
+            idle_ttl_seconds: Idle time after which a workspace's scratch is
+                removed.
+        """
         self.root = root.resolve()
         self.limit_bytes = limit_bytes
         self.idle_ttl_seconds = idle_ttl_seconds
 
     def workspace_root(self, workspace_id: str) -> Path:
+        """Return a workspace's top directory.
+
+        Args:
+            workspace_id: The workspace.
+
+        Returns:
+            The directory under ``root``.
+
+        Raises:
+            ValueError: The id has characters other than letters, digits,
+                ``_`` and ``-``.
+        """
         if not re.fullmatch(r"[A-Za-z0-9_-]+", workspace_id):
             raise ValueError("invalid workspace identity")
         return self.root / workspace_id
 
     def workspace_dir(self, workspace_id: str) -> Path:
+        """Return the directory that backs ``/workspace``.
+
+        Args:
+            workspace_id: The workspace.
+
+        Returns:
+            The directory on disk.
+        """
         return self.workspace_root(workspace_id) / "workspace"
 
     def inputs_dir(self, workspace_id: str) -> Path:
+        """Return the directory that backs ``/inputs``.
+
+        Args:
+            workspace_id: The workspace.
+
+        Returns:
+            The directory on disk.
+        """
         return self.workspace_root(workspace_id) / "inputs"
 
     @staticmethod
@@ -114,6 +180,17 @@ class WorkspaceStore:
             path.chmod(FILE_MODE)
 
     def ensure(self, workspace_id: str, tenant_id: str) -> None:
+        """Create the workspace and its owner marker if missing, and check the owner.
+
+        Args:
+            workspace_id: The workspace.
+            tenant_id: The owner's id.
+
+        Raises:
+            WorkspaceDeleted: The workspace was deleted.
+            WorkspaceOwnershipError: The workspace belongs to someone else or
+                its root or owner marker is a link.
+        """
         root = self.workspace_root(workspace_id)
         if self.deleted(workspace_id):
             raise WorkspaceDeleted("Conversation workspace was deleted")
@@ -134,6 +211,14 @@ class WorkspaceStore:
         os.utime(root, None)
 
     def ensure_outputs(self, workspace_id: str) -> Path:
+        """Create ``/workspace/outputs``, replacing a link or file in its place.
+
+        Args:
+            workspace_id: The workspace.
+
+        Returns:
+            The outputs directory on disk.
+        """
         outputs = self.workspace_dir(workspace_id) / "outputs"
         if outputs.is_symlink() or (outputs.exists() and not outputs.is_dir()):
             outputs.unlink(missing_ok=True)
@@ -141,6 +226,22 @@ class WorkspaceStore:
 
     @staticmethod
     def resolve_path(workspace: Path, inputs: Path, path: str, *, write: bool) -> Path:
+        """Resolve a conversation path to its location on disk.
+
+        Args:
+            workspace: Directory that backs ``/workspace``.
+            inputs: Directory that backs ``/inputs``.
+            path: A path under ``/workspace``, or under ``/inputs`` for reading.
+            write: Whether the path will be written; ``/inputs`` is refused then.
+
+        Returns:
+            The location on disk.
+
+        Raises:
+            PermissionError: The path is outside what may be accessed.
+            ValueError: The path is unsafe, goes through a symlink, or names a
+                hard-linked or special file.
+        """
         posix = assert_safe_path(path)
         if path == "/workspace" or path.startswith("/workspace/"):
             relative = posix.relative_to("/workspace")
@@ -161,10 +262,29 @@ class WorkspaceStore:
         return target
 
     def deleted(self, workspace_id: str) -> bool:
+        """Whether the workspace was deleted.
+
+        Args:
+            workspace_id: The workspace.
+
+        Returns:
+            Whether its deletion marker exists.
+        """
         self.workspace_root(workspace_id)
         return (self.root / ".locks" / f"{workspace_id}.deleted").exists()
 
     def check_owner(self, workspace_id: str, tenant_id: str) -> None:
+        """Raise unless the workspace exists and belongs to ``tenant_id``.
+
+        Args:
+            workspace_id: The workspace.
+            tenant_id: The expected owner's id.
+
+        Raises:
+            WorkspaceDeleted: The workspace was deleted.
+            WorkspaceOwnershipError: The workspace belongs to someone else or
+                its root or owner marker is a link.
+        """
         root = self.workspace_root(workspace_id)
         if self.deleted(workspace_id):
             raise WorkspaceDeleted("Conversation workspace was deleted")
@@ -197,7 +317,26 @@ class WorkspaceStore:
     @contextmanager
     def guard(self, workspace_id: str, *, operation: bool = False, shared: bool = False,
               blocking: bool = False, execution: bool = False, timeout: float = 5):
-        """Readers share files; short writes wait. Commands have a separate busy gate."""
+        """Readers share files; short writes wait. Commands have a separate busy gate.
+
+        Args:
+            workspace_id: The workspace.
+            operation: Take the operation lock instead of the files lock, and
+                skip the command check; taken exclusively, it does not wait
+                unless ``blocking`` is set.
+            shared: Share the lock with other holders instead of taking it alone.
+            blocking: Wait as long as needed instead of giving up.
+            execution: Take the command gate exclusively, as a running command
+                does.
+            timeout: Seconds to wait for the files lock.
+
+        Yields:
+            Nothing; the locks are held inside the ``with`` block.
+
+        Raises:
+            WorkspaceExecuting: A sandbox command is running.
+            WorkspaceBusy: The lock was not free in time.
+        """
         with ExitStack() as stack:
             if not operation:
                 try:
@@ -210,7 +349,22 @@ class WorkspaceStore:
             yield
 
     async def acquire(self, workspace_id: str, **kwargs):
-        """Acquire without blocking the event loop or leaving a cancelled waiter behind."""
+        """Acquire without blocking the event loop or leaving a cancelled waiter behind.
+
+        Retries for 0.25 seconds for an exclusive operation lock and 5 seconds
+        otherwise.
+
+        Args:
+            workspace_id: The workspace.
+            **kwargs: Passed to :meth:`guard`.
+
+        Returns:
+            The held lock; the caller must exit it.
+
+        Raises:
+            WorkspaceExecuting: A sandbox command is running.
+            WorkspaceBusy: The lock was not free in time.
+        """
         deadline = monotonic() + (0.25 if kwargs.get("operation") and not kwargs.get("shared") else 5)
         while True:
             lease = self.guard(workspace_id, timeout=0, **kwargs)
@@ -226,6 +380,19 @@ class WorkspaceStore:
 
     @asynccontextmanager
     async def aguard(self, workspace_id: str, **kwargs):
+        """Hold the workspace lock for an ``async with`` block.
+
+        Args:
+            workspace_id: The workspace.
+            **kwargs: Passed to :meth:`guard`.
+
+        Yields:
+            Nothing; the lock is held inside the block.
+
+        Raises:
+            WorkspaceExecuting: A sandbox command is running.
+            WorkspaceBusy: The lock was not free in time.
+        """
         lease = await self.acquire(workspace_id, **kwargs)
         try:
             yield
@@ -233,9 +400,23 @@ class WorkspaceStore:
             lease.__exit__(None, None, None)
 
     def paused(self, workspace_id: str) -> bool:
+        """Whether the workspace is marked as waiting on a pending interrupt.
+
+        Args:
+            workspace_id: The workspace.
+
+        Returns:
+            Whether the marker exists; cleanup skips such workspaces.
+        """
         return (self.workspace_root(workspace_id) / ".paused").exists()
 
     def mark_paused(self, workspace_id: str, paused: bool) -> None:
+        """Set or clear the pending-interrupt marker.
+
+        Args:
+            workspace_id: The workspace.
+            paused: Whether to set the marker.
+        """
         marker = self.workspace_root(workspace_id) / ".paused"
         if paused:
             self._write(marker, b"pending interrupt\n")
@@ -243,7 +424,26 @@ class WorkspaceStore:
             marker.unlink(missing_ok=True)
 
     def put(self, workspace_id: str, path: str, content: bytes, *, revision: str | None = None, create: bool = False) -> str:
-        """Atomic write; the caller holds the files guard."""
+        """Atomic write; the caller holds the files guard.
+
+        Args:
+            workspace_id: The workspace.
+            path: A path under ``/workspace``.
+            content: The file's new bytes.
+            revision: When given, the write happens only if the file's current
+                revision matches.
+            create: Whether the file must not exist yet.
+
+        Returns:
+            The revision of the written content.
+
+        Raises:
+            FileExistsError: ``create`` is set and the file exists.
+            RevisionConflict: The file changed since ``revision``.
+            ValueError: The write would exceed the workspace quota, or the
+                path is unsafe.
+            PermissionError: The path is not writable.
+        """
         target = self.resolve_path(self.workspace_dir(workspace_id), self.inputs_dir(workspace_id), path, write=True)
         if create and target.exists():
             raise FileExistsError(path)
@@ -282,6 +482,14 @@ class WorkspaceStore:
         )
 
     def enforce_limit(self, workspace_id: str) -> None:
+        """Recount the workspace's size and raise when it is over the quota.
+
+        Args:
+            workspace_id: The workspace.
+
+        Raises:
+            RuntimeError: The workspace holds more than ``limit_bytes``.
+        """
         size = self._directory_size(self.workspace_dir(workspace_id))
         self._record_usage(workspace_id, size)
         if size > self.limit_bytes:
@@ -290,6 +498,11 @@ class WorkspaceStore:
             )
 
     def invalidate_usage(self, workspace_id: str) -> None:
+        """Forget the recorded size, so the next write recounts it.
+
+        Args:
+            workspace_id: The workspace.
+        """
         (self.workspace_root(workspace_id) / ".usage").unlink(missing_ok=True)
 
     def _record_usage(self, workspace_id: str, size: int) -> None:
@@ -304,6 +517,17 @@ class WorkspaceStore:
         tenant_id: str,
         files: list[tuple[str, bytes]],
     ) -> None:
+        """Replace everything under ``/inputs`` with ``files`` in one swap.
+
+        Args:
+            workspace_id: The workspace.
+            tenant_id: The owner's id.
+            files: ``(path, content)`` pairs, each path under ``/inputs/``.
+
+        Raises:
+            ValueError: The files exceed 100 MB in total, or a path is not
+                under ``/inputs/``.
+        """
         if sum(len(content) for _path, content in files) > MAX_TRANSFER_BYTES:
             raise ValueError("Staged inputs exceed the 100 MB limit")
         self.ensure(workspace_id, tenant_id)
@@ -331,6 +555,20 @@ class WorkspaceStore:
         tenant_id: str,
         files: list[tuple[str, bytes]],
     ) -> list[WorkspaceFileResult]:
+        """Create new files in the workspace, up to 100 MB in total.
+
+        Args:
+            workspace_id: The workspace.
+            tenant_id: The owner's id.
+            files: ``(path, content)`` pairs.
+
+        Returns:
+            One result per file, with an error for an existing file or a
+            failed write.
+
+        Raises:
+            RuntimeError: The workspace is over its quota afterwards.
+        """
         self.ensure(workspace_id, tenant_id)
         results: list[WorkspaceFileResult] = []
         transferred = 0
@@ -361,6 +599,16 @@ class WorkspaceStore:
         tenant_id: str,
         paths: list[str],
     ) -> list[WorkspaceFileResult]:
+        """Read files from ``/workspace`` or ``/inputs``, up to 100 MB in total.
+
+        Args:
+            workspace_id: The workspace.
+            tenant_id: The owner's id.
+            paths: The files to read.
+
+        Returns:
+            One result per path, with the content or an error.
+        """
         self.ensure(workspace_id, tenant_id)
         results: list[WorkspaceFileResult] = []
         transferred = 0
@@ -392,7 +640,16 @@ class WorkspaceStore:
         workspace_id: str,
         started_at: datetime,
     ) -> WorkspaceArtifactScan:
-        """Return accepted outputs and bounded rejection details for one execution."""
+        """Return accepted outputs and bounded rejection details for one execution.
+
+        Args:
+            workspace_id: The workspace.
+            started_at: When the execution started; older files are ignored.
+
+        Returns:
+            The files under ``/workspace/outputs`` that may be delivered, and
+            the ones refused with their reasons.
+        """
         output_dir = self.workspace_dir(workspace_id) / "outputs"
         if output_dir.is_symlink() or not output_dir.is_dir():
             return WorkspaceArtifactScan()
@@ -450,6 +707,18 @@ class WorkspaceStore:
         return WorkspaceArtifactScan(tuple(names), tuple(dropped), omitted_drops)
 
     def delete(self, workspace_id: str, tenant_id: str) -> None:
+        """Delete the workspace and mark it deleted.
+
+        If removing the files fails, the marker is restored to what it was.
+
+        Args:
+            workspace_id: The workspace.
+            tenant_id: The owner's id.
+
+        Raises:
+            WorkspaceOwnershipError: The workspace belongs to someone else or
+                its root or owner marker is a link.
+        """
         root = self.workspace_root(workspace_id)
         if root.is_symlink():
             raise WorkspaceOwnershipError("Workspace root cannot be a symlink")
@@ -486,6 +755,17 @@ class WorkspaceStore:
         shutil.rmtree(root)
 
     def cleanup_expired(self, active_workspaces: set[str]) -> int:
+        """Remove the scratch directory of every workspace idle for too long.
+
+        Active, paused and locked workspaces are skipped.
+
+        Args:
+            active_workspaces: Ids of workspaces with a queued or running
+                execution.
+
+        Returns:
+            How many scratch directories were removed.
+        """
         cutoff = time() - self.idle_ttl_seconds
         removed = 0
         if not self.root.is_dir():
@@ -511,24 +791,51 @@ class WorkspaceStore:
 
 
 class WorkspaceBusy(RuntimeError):
+    """The workspace's files are locked by another operation."""
+
     pass
 
 
 class WorkspaceExecuting(WorkspaceBusy):
+    """A sandbox command is running in the workspace."""
+
     pass
 
 
 class WorkspaceDeleted(WorkspaceOwnershipError):
+    """The conversation's workspace was deleted."""
+
     pass
 
 
 class RevisionConflict(ValueError):
+    """The file changed since the revision an edit started from."""
+
     pass
 
 
 def tenant_id_for(user_id: str, secret: str) -> str:
+    """Derive the owner id stored in a user's workspaces.
+
+    Args:
+        user_id: The user.
+        secret: The filesystem's identity secret.
+
+    Returns:
+        A keyed SHA-256 hash (HMAC) of the user id, as hex.
+    """
     return hmac.new(secret.encode(), user_id.encode(), hashlib.sha256).hexdigest()
 
 
 def workspace_id_for(user_id: str, thread_id: str, secret: str) -> str:
+    """Derive a conversation's workspace id.
+
+    Args:
+        user_id: The conversation's owner.
+        thread_id: The conversation.
+        secret: The filesystem's identity secret.
+
+    Returns:
+        A keyed SHA-256 hash (HMAC) of the user and thread ids, as hex.
+    """
     return hmac.new(secret.encode(), f"{user_id}\0{thread_id}".encode(), hashlib.sha256).hexdigest()

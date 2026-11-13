@@ -1,9 +1,8 @@
 """Tests for agent input preparation.
 
-Moved here from juena-chatbot in plan 02/step 3: ``AgentInputHandler`` is
-core's. The first test now takes the ``configured`` fixture from
-``conftest.py``, because ``build_run_context`` resolves the provider and model
-against ``settings()``, and core refuses to invent settings nobody configured.
+The first test takes the ``configured`` fixture from ``conftest.py``, because
+``build_run_context`` resolves the provider and model against ``settings()``,
+and core refuses to invent settings nobody configured.
 """
 
 from __future__ import annotations

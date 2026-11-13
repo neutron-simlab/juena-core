@@ -21,7 +21,12 @@ __all__ = ["RunTracing", "TracingHook", "configure_tracing", "with_tracing"]
 
 @dataclass(frozen=True, slots=True)
 class RunTracing:
-    """What one run carries for the application's tracer."""
+    """What one run carries for the application's tracer.
+
+    Attributes:
+        callbacks: Callback handlers added to the run's config.
+        metadata: Metadata merged into the run's config.
+    """
 
     callbacks: Sequence[BaseCallbackHandler] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -38,6 +43,12 @@ def configure_tracing(hook: TracingHook) -> None:
 
     Same rule as ``configure()``: repeating the same hook is harmless, but a
     second, different hook would silently change what earlier runs reported.
+
+    Args:
+        hook: Called once per run with ``thread_id`` and ``user_id``.
+
+    Raises:
+        RuntimeError: A different hook was already installed.
     """
 
     global _hook
@@ -55,6 +66,14 @@ def with_tracing(
     ``ensure_config``, which also copies in the config of whatever run is
     active in the caller's context -- exactly what a detached run must not
     inherit.
+
+    Args:
+        config: The run's config.
+        thread_id: Conversation the run belongs to.
+        user_id: User the run belongs to.
+
+    Returns:
+        A new config, or ``config`` itself when no hook is installed.
     """
 
     if _hook is None:

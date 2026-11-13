@@ -1,35 +1,25 @@
-"""The Streamlit side of the server-sent-event contract.
+"""The Streamlit side of the server-sent-event (SSE) contract.
 
-Split out of ``juena-chatbot/app/chat_interface.py`` (00-BOUNDARY.md,
-decision 7): **the SSE contract is core's; the page is the app's.** What moved
-is the stream loop, the chunk classifiers, and the cards that answer an
-interrupt. ``render_chat_interface()``, ``render_starter_topics()`` and the
-composer stay in each application, because what a page offers before the
-first message is that product's question.
+The stream loop, the chunk classifiers and the cards that answer an interrupt
+live here. The page itself, including the composer and what it offers before
+the first message, belongs to each application.
 
-Three couplings the source had to one application, each turned into a
-declared parameter rather than carried across (the same treatment CP4 gave
-``StreamPolicy`` and ``closing_note`` on the server):
+What an application supplies, so that core does not assume it:
 
 ``custom_status``
-    The source's classifiers named ``sandbox_status`` directly. An
-    application that emits its own status event passes a renderer for it;
-    core knows only its own ``status``.
+    A renderer for each of the application's own status events. Core knows
+    only its own ``status`` event.
 
 ``approval``
-    ``"execute_approval"`` is juena-chatbot's registered interrupt kind, not
-    core's, and so are "Allow this command?" and "Running in the sandbox…".
-    :class:`ApprovalCard` carries the kind name and the wording; passing
-    ``None`` means this application registers no approval kind, which is v2's
-    case. Core still owns the *question* card outright, because ``ask_user``
-    is core's.
+    An :class:`ApprovalCard` with the application's interrupt kind name and
+    the card's wording. ``None`` means the application registers no approval
+    kind. Core always draws the question card itself, because ``ask_user`` is
+    core's.
 
 ``session state``
-    Read and written under the names in :data:`SESSION_KEYS`. Both
-    applications already use these exact names, so this is shared vocabulary
-    rather than one app's convention imposed on the other — but it is a
-    contract either could break silently, so it is written down here and
-    asserted in ``tests/test_ui_contracts.py``.
+    Read and written under the names in :data:`SESSION_KEYS`. The page and
+    this module share these names, so renaming one on either side breaks the
+    other silently.
 """
 
 from __future__ import annotations
@@ -69,8 +59,10 @@ __all__ = [
     "update_instruction_messages",
 ]
 
-#: Every ``st.session_state`` name this module touches. The page owns the first
-#: five and merely shares them; the remainder are this module's bookkeeping.
+#: The fixed ``st.session_state`` names this module shares with the page. The
+#: page owns the first five; the rest are this module's bookkeeping. Not listed:
+#: ``run_controls`` (the page sets it to turn on stop and steer),
+#: ``composer_run_state``, and the per-card keys built from each interrupt id.
 SESSION_KEYS = (
     "client",
     "thread_id",
@@ -105,6 +97,12 @@ class ActivityLog:
     """
 
     def __init__(self, status: Any, steps: Iterable[dict[str, Any]] = ()) -> None:
+        """Initialize the log.
+
+        Args:
+            status: The ``st.status`` box to draw into, or None to keep the steps only.
+            steps: Steps carried over from the part of the turn before a pause.
+        """
         self._status = status
         self._slots: list[Any] = []
         self._complete = False
@@ -113,7 +111,13 @@ class ActivityLog:
             self._add(dict(step))
 
     def start(self, step_id: str | None, label: str, nested: bool) -> None:
-        """Show a tool call the model has just made."""
+        """Show a tool call the model has just made.
+
+        Args:
+            step_id: The tool call's id. A known id relabels its line.
+            label: The line's text.
+            nested: Whether a specialist made the call.
+        """
         if self._complete:
             # The answer had begun, then the model reached for another tool.
             self.update(label="Working…", state="running", expanded=True)
@@ -127,7 +131,14 @@ class ActivityLog:
         self._redraw(index)
 
     def finish(self, step_id: str | None, label: str, failed: bool, nested: bool) -> None:
-        """Mark a tool call finished, or failed, once its result is back."""
+        """Mark a tool call finished, or failed, once its result is back.
+
+        Args:
+            step_id: The tool call's id.
+            label: The line's text.
+            failed: Whether the call failed.
+            nested: Whether a specialist made the call.
+        """
         state = "failed" if failed else "done"
         index = self._index(step_id)
         if index is None:
@@ -138,11 +149,20 @@ class ActivityLog:
         self._redraw(index)
 
     def write(self, text: str) -> None:
-        """Add a note, such as why a sandbox run failed."""
+        """Add a note, such as why a sandbox run failed.
+
+        Args:
+            text: The note.
+        """
         self._add({"id": None, "label": str(text), "state": None, "nested": False})
 
     def update(self, **kwargs: Any) -> None:
-        """Relabel, open or close the status box."""
+        """Relabel, open or close the status box.
+
+        Args:
+            **kwargs: Passed to the status box's ``update``. ``state="complete"``
+                also records that the answer has begun.
+        """
         if "state" in kwargs:
             self._complete = kwargs["state"] == "complete"
         if self._status is not None:
@@ -186,12 +206,17 @@ class ApprovalCard:
     :func:`~juena_core.server.interrupts.register_interrupt_kind` and composed
     into ``create_app(resume_input=...)``; core inventing a name here would
     send a resume body the server's union rejects.
+
+    Attributes:
+        kind: The interrupt kind the application registered.
+        heading: The card's title.
+        decision_status: The caption on the spent card, per decision, so a
+            deactivated card still says why it went quiet.
+        format_limits: Turns the card's limits into its caption.
     """
 
     kind: str
     heading: str = "Allow this action?"
-    #: Caption shown on the spent card, per decision, so a deactivated card
-    #: still says why it went quiet.
     decision_status: Mapping[str, str] = field(
         default_factory=lambda: {
             "approve": "Running…",
@@ -254,7 +279,20 @@ def process_stream_chunk(
 ) -> tuple[str, bool]:
     """Fold one content chunk into the transcript and the placeholder.
 
-    Returns the updated ``(response_text, received_complete_message)``.
+    Args:
+        chunk: A complete message or a token event.
+        client: The API client, which recognises token events.
+        response_text: The answer text so far.
+        received_complete_message: Whether a complete answer has arrived;
+            later tokens are then ignored.
+        message_placeholder: The page slot the answer is drawn into.
+        messages: The transcript. A message with a known id replaces its copy.
+        pending_artifacts: Files streamed before the answer; they are merged
+            into it and the list is cleared.
+        render: Whether to draw. False only updates the state.
+
+    Returns:
+        The updated ``(response_text, received_complete_message)``.
     """
     if isinstance(chunk, ChatMessage):
         content_str = str(chunk.content) if chunk.content is not None else ""
@@ -324,19 +362,38 @@ def process_stream_chunk(
 def is_status_chunk(chunk: Any, extra_types: Iterable[str] = ()) -> bool:
     """Whether a chunk reports agent activity rather than content.
 
-    ``extra_types`` names an application's own status events, e.g.
-    ``{"sandbox_status"}``.
+    Args:
+        chunk: One streamed event.
+        extra_types: An application's own status event types, e.g.
+            ``{"sandbox_status"}``.
+
+    Returns:
+        True for a ``status`` event or one of ``extra_types``.
     """
     return isinstance(chunk, dict) and chunk.get("type") in {"status", *extra_types}
 
 
 def is_approval_chunk(chunk: Any) -> bool:
-    """Whether a chunk asks the user to confirm an action before it runs."""
+    """Whether a chunk asks the user to confirm an action before it runs.
+
+    Args:
+        chunk: One streamed event.
+
+    Returns:
+        True for an ``approval_required`` event.
+    """
     return isinstance(chunk, dict) and chunk.get("type") == "approval_required"
 
 
 def is_interrupt_chunk(chunk: Any) -> bool:
-    """Whether a chunk pauses the turn to wait on the user."""
+    """Whether a chunk pauses the turn to wait on the user.
+
+    Args:
+        chunk: One streamed event.
+
+    Returns:
+        True for an approval or a clarification request.
+    """
     return isinstance(chunk, dict) and chunk.get("type") in {
         "approval_required",
         "clarification_required",
@@ -344,7 +401,14 @@ def is_interrupt_chunk(chunk: Any) -> bool:
 
 
 def is_artifact_chunk(chunk: Any) -> bool:
-    """Whether a chunk carries one generated file."""
+    """Whether a chunk carries one generated file.
+
+    Args:
+        chunk: One streamed event.
+
+    Returns:
+        True for an ``artifact`` event.
+    """
     return isinstance(chunk, dict) and chunk.get("type") == "artifact"
 
 
@@ -359,6 +423,11 @@ def apply_status_chunk(
     line finished, so the transcript stays free of raw tool payloads. An
     application's own status event is handed to the renderer it registered in
     ``custom_status``.
+
+    Args:
+        activity: The turn's activity log.
+        chunk: The status event.
+        custom_status: Renderers for the application's own status events, by type.
     """
     chunk_type = chunk.get("type", "")
     renderer = (custom_status or {}).get(chunk_type)
@@ -529,7 +598,15 @@ def stream_and_display_response(
     *,
     custom_status: Mapping[str, StatusRenderer] | None = None,
 ) -> None:
-    """Start a user turn and stream its activity and final answer."""
+    """Start a user turn and stream its activity and final answer.
+
+    Args:
+        message: The user's message.
+        message_placeholder: The page slot the reply is drawn into.
+        should_rerun: Whether to rerun the page when the reply ends.
+        attachments: Files sent with the message, if any.
+        custom_status: Renderers for the application's own status events, by type.
+    """
     chunks = st.session_state.client.stream(
         message=message,
         thread_id=st.session_state.thread_id,
@@ -553,6 +630,15 @@ def stream_and_display_resume(
     ``kind`` and ``fields`` go straight to
     :meth:`~juena_core.clients.base.BaseAgentClient.resume_stream`, so an
     application resumes its own registered interrupt without core naming it.
+    With ``run_controls`` set in the session, the rest of the turn is read in
+    the background instead.
+
+    Args:
+        interrupt: The pending interrupt being answered.
+        message_placeholder: The page slot the reply is drawn into.
+        kind: The interrupt kind the server resumes it as.
+        custom_status: Renderers for the application's own status events, by type.
+        **fields: The answer's fields for that kind.
     """
     thread_id = st.session_state.thread_id
     interrupt_id = str(interrupt.get("interrupt_id") or "")
@@ -916,12 +1002,18 @@ def render_pending_interrupt(
 ) -> bool:
     """Render controls for the current thread's pending question or approval.
 
-    Returns whether a card was drawn, so the page can skip its composer.
-
     ``approval`` is ``None`` for an application that registers no approval
-    kind: a pending approval then goes unrendered, which is the honest
-    outcome — core has no name to resume it with. The *question* card needs no
-    such argument, because ``ask_user`` is core's own.
+    kind. A pending approval is then not drawn, because core has no kind name
+    to resume it with. The question card needs no such argument, because
+    ``ask_user`` is core's own.
+
+    Args:
+        approval: How to draw and resume the application's approval card.
+        custom_status: Renderers for the application's own status events, by type.
+
+    Returns:
+        Whether a card, or a warning that it could not be restored, was drawn,
+        so the page can skip its composer.
     """
     approvals = st.session_state.get("pending_approvals") or {}
     pending = approvals.get(st.session_state.thread_id)
@@ -962,7 +1054,11 @@ def render_pending_interrupt(
 
 
 def update_instruction_messages(snapshot):
-    """Merge acceptance and delivery echoes into one transcript entry per ID."""
+    """Merge acceptance and delivery echoes into one transcript entry per ID.
+
+    Args:
+        snapshot: A ``run`` event, with its ``run_id`` and ``instructions``.
+    """
     for item in snapshot.get("instructions", []):
         message = ChatMessage(
             id=f"steering:{snapshot['run_id']}:{item['id']}",
@@ -981,7 +1077,11 @@ def update_instruction_messages(snapshot):
 
 
 def render_running_response(*, custom_status=None):
-    """Mount only while a reader exists; the fragment never waits on HTTP."""
+    """Mount only while a reader exists; the fragment never waits on HTTP.
+
+    Args:
+        custom_status: Renderers for the application's own status events, by type.
+    """
     controller = get_stream_controller()
     if (
         controller.thread is not None
@@ -992,6 +1092,7 @@ def render_running_response(*, custom_status=None):
 
 @st.fragment(run_every=0.25)
 def _render_response_fragment(*, custom_status=None):
+    """Redraw the live reply from the background reader's buffer, four times a second."""
     controller = get_stream_controller()
     view = controller.view
     custom_status = custom_status or {}
@@ -1047,10 +1148,9 @@ def _render_response_fragment(*, custom_status=None):
             )
         if controller.error:
             st.error(controller.error)
-        # Read late, as the composer reads it just after this redraw: reading
-        # it early let the composer switch on before this redraw reran the
-        # page for the new state, and that rerun dropped a correction sent in
-        # between.
+        # Read late, as the composer reads it just after this redraw. Read
+        # early, the composer can switch on before this redraw reruns the page
+        # for the new state, and that rerun drops a correction sent in between.
         run = controller.run
         labels = {
             "stopping": "Stopping…",

@@ -7,9 +7,8 @@ process. Provider and model are handled per invocation through
 so the pair passed to a factory only supplies the defaults used while the graph
 is built.
 
-**Registering an agent requires importing its module.** That is a side-effect
-import, and the application's ``service.py`` is where it has to happen — see
-``juena_core.server.service``.
+Registering an agent requires importing its module only for that side effect,
+in the application's ``service.py``; see ``juena_core.server.service``.
 """
 
 from __future__ import annotations
@@ -41,12 +40,10 @@ __all__ = [
 
 #: The agent id used when a request names none.
 #:
-#: It starts unset because a shared package must not silently choose one
-#: application's agent: a core that defaulted to ``"juena"`` would answer
-#: VITESS requests with JüNA's supervisor. ``register_agent_factory(
-#: set_as_default=True)`` rebinds it at import time, so read it through
-#: :func:`get_default_agent` — a ``from ... import DEFAULT_AGENT`` captures
-#: whatever value happened to be current when *that* module was loaded.
+#: It starts unset because a shared package must not choose an application's
+#: agent for it. ``register_agent_factory(set_as_default=True)`` rebinds it at
+#: import time, so read it through :func:`get_default_agent`: a
+#: ``from ... import DEFAULT_AGENT`` keeps the value current at that import.
 DEFAULT_AGENT: str | None = None
 
 AgentInstance = Any
@@ -87,15 +84,16 @@ def register_agent_factory(
 
 
 def get_default_agent() -> str:
-    """The agent id to use when a request does not name one.
+    """Return the agent id to use when a request does not name one.
 
-    Raises ``RuntimeError`` — not ``AgentNotFoundError`` — when no application
-    has registered a default. Nothing is missing from the *request*: the
-    application's service module never imported its agent module, which is the
-    side-effect-import trap, and answering 404 would send whoever is debugging
-    to look at the request instead of at the import. This is the same shape as
-    ``settings()`` and ``get_checkpointer()`` refusing before startup, and it
-    says what to do about it.
+    Returns:
+        The id registered with ``set_as_default=True``.
+
+    Raises:
+        RuntimeError: No default is registered. Not ``AgentNotFoundError``,
+            because the fault is not in the request: the application's service
+            module never imported its agent module, and a 404 would send
+            whoever is debugging to the request instead of the import.
     """
 
     if DEFAULT_AGENT is None:
@@ -132,8 +130,14 @@ async def get_agent(
 ) -> CompiledStateGraph:
     """Return an agent's compiled graph, building it on first use.
 
-    ``provider`` and ``model`` are used only for that first build; afterwards
-    model selection travels per invocation through runtime context.
+    Args:
+        agent_id: The registered agent id.
+        provider: Default provider for the first build only; afterwards model
+            selection travels per invocation through runtime context.
+        model: Default model for the first build only.
+
+    Returns:
+        The agent's compiled graph.
 
     Raises:
         AgentNotFoundError: The id is not registered, or its factory failed.
@@ -181,12 +185,20 @@ async def get_agent(
 
 
 def get_agent_resources(agent_id: str) -> AgentInstance:
-    """The factory's instance object for an already-created agent.
+    """Return the factory's instance object for an already-created agent.
 
     :func:`get_agent` hands back only the graph, which is all a request needs.
     Anything that has to reach past the graph lives on the instance beside it.
-    Raises if the agent has not been created yet, because that means the caller
-    ran before the first request.
+
+    Args:
+        agent_id: The registered agent id.
+
+    Returns:
+        The instance object the agent's factory returned with its graph.
+
+    Raises:
+        AgentNotFoundError: The agent has not been created yet, which means
+            the caller ran before the first request.
     """
 
     if agent_id not in _agent_registry:
@@ -197,12 +209,9 @@ def get_agent_resources(agent_id: str) -> AgentInstance:
 async def shutdown_agents() -> None:
     """Release long-lived resources held by cached agents.
 
-    An agent factory may hold network clients — an MCP session, an HTTP pool —
-    that stay open for the process lifetime. Core cannot know what they are, so
-    the contract is one method: **if an agent's instance object exposes
-    ``aclose()`` or ``close()``, it is called here.** An application whose
-    resources hold a client implements that method; one that holds nothing
-    implements nothing and this is a no-op.
+    An agent factory may hold network clients (an MCP session, an HTTP pool)
+    open for the process lifetime. If an agent's instance object has
+    ``aclose()`` or ``close()``, it is called here; otherwise nothing happens.
     """
 
     for agent_id, (instance, _graph) in list(_agent_registry.items()):
@@ -222,6 +231,10 @@ async def shutdown_agents() -> None:
 
 
 def list_registered_agents() -> list[str]:
-    """Every agent id with a registered factory, whether or not it is built."""
+    """List every agent id with a registered factory, whether or not it is built.
+
+    Returns:
+        The registered agent ids.
+    """
 
     return list(_agent_factories)

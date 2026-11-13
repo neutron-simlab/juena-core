@@ -44,16 +44,30 @@ _MARKDOWN_CHARS = re.compile(r"([\\`*_{}\[\]<>#|~$])")
 
 
 def short(value: Any, limit: int = LABEL_CHARS) -> str:
-    """*value* on one line, cut to *limit* characters."""
+    """Return *value* on one line, cut to *limit* characters.
+
+    Args:
+        value: Anything; None becomes "".
+        limit: The most characters to keep before adding "…".
+
+    Returns:
+        The one-line text.
+    """
 
     text = " ".join(str(value if value is not None else "").split())
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
 def code(value: Any) -> str:
-    """*value* as inline code, or "" when there is nothing to show.
+    """Return *value* as inline code, or "" when there is nothing to show.
 
     A backtick inside would close the code span early, so it becomes a quote.
+
+    Args:
+        value: A path, pattern or command.
+
+    Returns:
+        The Markdown code span, or "".
     """
 
     text = short(value).replace("`", "'")
@@ -61,10 +75,16 @@ def code(value: Any) -> str:
 
 
 def quote(value: Any) -> str:
-    """*value* in quotation marks, or "" when there is nothing to show.
+    """Return *value* in quotation marks, or "" when there is nothing to show.
 
     Escaped, because a query such as "cost $5 to $10" would otherwise render
     as LaTeX and "*args" as italics.
+
+    Args:
+        value: Prose a model wrote.
+
+    Returns:
+        The escaped text in quotation marks, or "".
     """
 
     text = _MARKDOWN_CHARS.sub(r"\\\1", short(value))
@@ -72,7 +92,16 @@ def quote(value: Any) -> str:
 
 
 def describe(action: str, detail: str = "", *, sep: str = " ") -> str:
-    """Join an action and its detail, leaving the detail out when it is empty."""
+    """Join an action and its detail, leaving the detail out when it is empty.
+
+    Args:
+        action: What the step does, such as "Read".
+        detail: What it acts on.
+        sep: Text between the action and the detail.
+
+    Returns:
+        The joined line.
+    """
 
     return f"{action}{sep}{detail}" if detail else action
 
@@ -102,10 +131,19 @@ def describe_tool_call(
     args: Any,
     labels: Mapping[str, ToolLabel] | None = None,
 ) -> str:
-    """The activity-log line for one tool call.
+    """Return the activity-log line for one tool call.
 
     The application's ``labels`` win over core's, so an application can
     reword a core tool as well as describe its own.
+
+    Args:
+        name: The tool's name.
+        args: The call's arguments; anything but a dict counts as none.
+        labels: The application's tool labels.
+
+    Returns:
+        The line. A tool nobody describes shows as its name and first
+        argument.
     """
 
     args = args if isinstance(args, dict) else {}

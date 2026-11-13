@@ -276,10 +276,10 @@ def _plot_backend(tmp_path, jobs_class=_PlotJobs):
 
 
 def test_dropped_plot_is_reported_to_the_model(tmp_path) -> None:
-    """The bug that made the agent claim a figure the user never saw.
+    """A refused plot is reported, or the agent claims a figure the user never sees.
 
-    A refused registration used to be swallowed, leaving the model a clean exit
-    code and its own script's success message to reason from.
+    Without the report the model has only a clean exit code and its own
+    script's success message to reason from.
     """
     store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
     set_artifact_store_for_tests(store)
@@ -349,8 +349,8 @@ def test_a_failed_run_with_outputs_is_not_told_to_finish(tmp_path) -> None:
 def test_rerunning_a_plot_delivers_only_the_latest_version(tmp_path) -> None:
     """Each rerun rewrites outputs/plot.png; the user should get one plot.
 
-    Before, every version counted against the per-turn plot budget, so a ninth
-    run could no longer deliver its plot at all.
+    If every version counted against the per-turn plot budget, a ninth run
+    could not deliver its plot at all.
     """
     store = ArtifactStore(tmp_path / "artifacts", tmp_path / "audit.jsonl")
     set_artifact_store_for_tests(store)
@@ -370,7 +370,7 @@ def test_rerunning_a_plot_delivers_only_the_latest_version(tmp_path) -> None:
 
 
 def test_busy_workspace_reports_the_missing_file(tmp_path) -> None:
-    """_collect returns nothing when the guard is busy, which used to be silent."""
+    """_collect returns nothing when the guard is busy; the model must be told."""
 
     class _BusyJobs(_PlotJobs):
         @contextmanager

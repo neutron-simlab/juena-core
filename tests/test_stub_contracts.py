@@ -1,4 +1,4 @@
-"""Structural contracts fixed by the CP0 package skeleton."""
+"""Structural contracts: module exports, client methods and the registry default."""
 
 from __future__ import annotations
 

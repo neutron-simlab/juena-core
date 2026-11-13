@@ -5,11 +5,10 @@ adds its own tables by importing ``Base`` from here, which also means a model
 class nobody imports is never created by ``create_all`` — the application
 imports its models module for that side effect.
 
-``User.subject`` and ``User.issuer`` are deliberately *attribute* renames over
-the original column names. There is no Alembic here: the schema is created by
-``Base.metadata.create_all``, which never renames a column, so renaming these
-on disk would leave the populated ``saml_subject`` column sitting beside a new
-empty one.
+``User.issuer`` and ``User.subject`` are Python names for the columns
+``idp_entity_id`` and ``saml_subject``. Do not rename the columns: the schema is
+created by ``Base.metadata.create_all``, which never renames a column, so the
+populated old column would sit beside a new empty one.
 """
 
 from __future__ import annotations
@@ -33,6 +32,12 @@ __all__ = ["utc_now", "Base", "User", "AuthSession", "Chat"]
 
 
 def utc_now() -> datetime:
+    """Return the current time in UTC.
+
+    Returns:
+        A timezone-aware datetime.
+    """
+
     return datetime.now(timezone.utc)
 
 
@@ -41,16 +46,32 @@ class Base(DeclarativeBase):
 
 
 class User(Base):
+    """One person who has signed in, or the fixed local principal.
+
+    Attributes:
+        id: The user's id, used as ``Principal.id``.
+        issuer: Opaque identity-provider entity id: a SAML issuer, or a fixed
+            local value when the application has no identity provider. Stored
+            in the ``idp_entity_id`` column.
+        subject: Opaque subject within that issuer, such as a SAML NameID.
+            Stored in the ``saml_subject`` column.
+        email: The email address, if known.
+        display_name: The name to show, if known.
+        is_active: The sessions of an inactive user are refused.
+        created_at: When the row was created.
+        updated_at: When the row last changed.
+        last_login_at: When the user last signed in.
+        sessions: The user's sign-in sessions.
+        chats: The user's conversations.
+    """
+
     __tablename__ = "users"
     __table_args__ = (
         UniqueConstraint("idp_entity_id", "saml_subject", name="uq_users_idp_subject"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    #: Opaque identity-provider entity id. A SAML issuer in juena-chatbot, a
-    #: fixed local value where the application ships no identity provider.
     issuer: Mapped[str] = mapped_column("idp_entity_id", Text, nullable=False)
-    #: Opaque subject within that issuer, a SAML NameID in juena-chatbot.
     subject: Mapped[str] = mapped_column("saml_subject", Text, nullable=False)
     email: Mapped[str | None] = mapped_column(Text)
     display_name: Mapped[str | None] = mapped_column(Text)
@@ -68,6 +89,19 @@ class User(Base):
 
 
 class AuthSession(Base):
+    """One sign-in session, stored by the hash of its cookie token.
+
+    Attributes:
+        token_hash: SHA-256 hex digest of the session token; the token itself
+            is never stored.
+        user_id: The id of the user the session belongs to.
+        created_at: When the session was issued.
+        expires_at: When the session stops working.
+        last_seen_at: When the session last authenticated a request.
+        revoked_at: When the session was signed out, if it was.
+        user: The user the session belongs to.
+    """
+
     __tablename__ = "auth_sessions"
 
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -94,6 +128,16 @@ class Chat(Base):
     Message content deliberately lives only in the LangGraph checkpointer
     tables; mirroring it here would give the UI and the agent two histories
     that can drift apart.
+
+    Attributes:
+        thread_id: The conversation's thread id, which keys its checkpoints.
+        user_id: The owner's id.
+        agent_id: Which registered graph owns this conversation.
+        title: The title shown in the chat list.
+        summary: A summary of the conversation, set by the client.
+        created_at: When the chat was created.
+        updated_at: When the chat last changed; chat lists sort by it.
+        user: The owner.
     """
 
     __tablename__ = "chats"
@@ -103,10 +147,8 @@ class Chat(Base):
     user_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    #: Which registered graph owns this conversation. Not nullable: an
-    #: application with two agents resumes a thread under the graph named in
-    #: the request, and a checkpoint whose state channels belong to the other
-    #: graph is the failure this column exists to prevent.
+    #: Not nullable: a thread resumed under the wrong graph would get a
+    #: checkpoint that does not fit that graph's state.
     agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False, default="New Chat")
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")

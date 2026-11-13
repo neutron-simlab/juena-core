@@ -1,4 +1,4 @@
-"""CP5 policy around LangChain's built-in MCP adapter."""
+"""Policy around LangChain's built-in MCP adapter."""
 
 from __future__ import annotations
 

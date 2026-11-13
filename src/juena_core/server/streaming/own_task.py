@@ -2,23 +2,23 @@
 
 sse-starlette serves each response inside an anyio cancel scope. When the
 client disconnects or the server shuts down, that scope cancels the request,
-and it keeps cancelling it at every later ``await``. Two things went wrong
-when the agent ran directly inside that response:
+and it keeps cancelling it at every later ``await``. An agent run directly
+inside that response breaks in two ways:
 
-- **Cancelled while waiting for the next event.** LangGraph's cleanup cancels
-  its running node tasks and then *waits* for them. That wait is one of those
-  later awaits, so the cleanup was cut short.
-- **Cancelled while sending an event.** The generator feeding the response
-  was paused at a ``yield``, so its ``finally`` never ran at all.
+- Cancelled while waiting for the next event: LangGraph's cleanup cancels its
+  running node tasks and then waits for them, and that wait is cut short too.
+- Cancelled while sending an event: the generator feeding the response is
+  paused at a ``yield``, so its ``finally`` never runs.
 
-Either way, a node went on running after its stream was gone. It kept calling
-the model, kept the conversation reserved, and its tracing spans ended only
-after the server had already flushed its tracer.
+Either way a node keeps running after its stream is gone: it keeps calling the
+model, keeps the conversation reserved, and its tracing spans end after the
+server has flushed its tracer.
 
-So the response owns the run instead. The agent's generator runs in an
-ordinary asyncio task of its own, outside the cancel scope. Whatever ends the
-response, its exit cancels that task once, waits for the cleanup in a shielded
-scope (up to a deadline), and only then releases the conversation.
+So the response owns the run. The agent's generator runs in an ordinary
+asyncio task of its own, outside the cancel scope. Whatever ends the response,
+its exit cancels that task once, waits for the cleanup in a shielded scope (one
+the outer cancellation cannot interrupt) up to a deadline, and only then
+releases the conversation.
 """
 
 from __future__ import annotations
@@ -57,6 +57,15 @@ async def run_in_own_task(
     An error in ``source`` is raised by the iterator, exactly as iterating
     ``source`` directly would have raised it. The queue is unbounded, so the
     run is never held back by a slow client; a chat's events are small.
+
+    Args:
+        source: The run's events.
+        cleanup_seconds: How long to wait for the task to unwind on exit.
+        control: The run's control, if run controls are on. Its snapshots are
+            sent with the events, and the run is finalized when it ends.
+
+    Yields:
+        An iterator over ``source``'s items.
     """
 
     queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
@@ -137,6 +146,15 @@ class AgentStreamResponse(EventSourceResponse):
         cleanup_seconds: float = CLEANUP_SECONDS,
         control: RunControl | None = None,
     ) -> None:
+        """Initialize the response.
+
+        Args:
+            source: The run's SSE payloads.
+            on_close: Called last, after the run has been stopped and cleaned up.
+            cleanup_seconds: How long to wait for the run to unwind.
+            control: The run's control, if run controls are on.
+        """
+
         super().__init__(source)
         self._source = source
         self._on_close = on_close
@@ -144,6 +162,8 @@ class AgentStreamResponse(EventSourceResponse):
         self._control = control
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Serve the response with the run in its own task, then call ``on_close``."""
+
         try:
             async with run_in_own_task(
                 self._source, cleanup_seconds=self._cleanup_seconds, control=self._control,

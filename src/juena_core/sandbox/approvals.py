@@ -42,6 +42,15 @@ class ApprovalResumeInput(ResumeBase):
 
     @model_validator(mode="after")
     def one_decision_format(self) -> Self:
+        """Require exactly one of ``decision`` or ``decisions``.
+
+        Returns:
+            The validated input.
+
+        Raises:
+            ValueError: Both or neither are set, or ``edited_command`` is set
+                beside ``decisions``.
+        """
         if (self.decision is None) == (self.decisions is None):
             raise ValueError("Provide either decision or decisions")
         if self.decisions is not None and self.edited_command is not None:
@@ -58,7 +67,15 @@ SandboxResumeInput = Annotated[
 def sandbox_interrupt_on(
     description: str = "Review the generated command before it runs in the isolated sandbox.",
 ) -> dict[str, Any]:
-    """Return the ``HumanInTheLoopMiddleware`` policy for ``execute``."""
+    """Return the ``HumanInTheLoopMiddleware`` policy for ``execute``.
+
+    Args:
+        description: The text shown with each command awaiting approval.
+
+    Returns:
+        The policy mapping: an ``execute`` call may be approved, edited or
+        rejected, and asks only when ``requires_execution_approval`` says so.
+    """
 
     return {
         "execute": {
@@ -70,6 +87,7 @@ def sandbox_interrupt_on(
 
 
 def _execute_actions(interrupt: Interrupt) -> list[dict[str, Any]]:
+    """Return the interrupt's ``execute`` requests; raise ``ResumeError`` if any is malformed."""
     value = interrupt.value
     if not isinstance(value, dict):
         raise ResumeError("Malformed sandbox approval request")
@@ -89,6 +107,7 @@ def _execute_actions(interrupt: Interrupt) -> list[dict[str, Any]]:
 
 
 def _approval_event(interrupt: Interrupt) -> dict[str, Any] | None:
+    """Build the approval card's event, or None when this is not a sandbox approval."""
     try:
         _execute_actions(interrupt)
     except ResumeError:
@@ -113,6 +132,7 @@ def _execute_resume(
     user_id: str,
     payload: ApprovalResumeInput,
 ) -> Command:
+    """Turn the user's decisions into the resume command, auditing each one."""
     actions = _execute_actions(interrupt)
     choices = payload.decisions
     if choices is None:
@@ -141,6 +161,7 @@ def _execute_resume(
 
 
 def _command_decision(action: dict[str, Any], choice: ApprovalDecision) -> dict[str, Any]:
+    """Translate one decision into the form ``HumanInTheLoopMiddleware`` resumes with."""
     if choice.decision == "approve":
         if choice.edited_command is not None:
             raise ResumeError("edited_command is valid only for an edit decision")

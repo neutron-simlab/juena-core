@@ -39,7 +39,15 @@ def _get_log_level(level: int | str | None = None) -> int:
 
 
 def setup_logger(logger: logging.Logger, level: int | str | None = None) -> None:
-    """Configure *logger* once with the shared format and requested level."""
+    """Configure *logger* once with the shared format and requested level.
+
+    A logger that already has a handler is left alone.
+
+    Args:
+        logger: The logger to configure.
+        level: Level name or number; ``None`` means the configured
+            ``LOG_LEVEL``, or ``INFO`` before core is configured.
+    """
 
     if logger.handlers:
         return
@@ -55,7 +63,16 @@ def setup_logger(logger: logging.Logger, level: int | str | None = None) -> None
 
 
 def get_logger(name: str, level: int | str | None = None) -> logging.Logger:
-    """Return a consistently configured logger named *name*."""
+    """Return a consistently configured logger named *name*.
+
+    Args:
+        name: Logger name, usually ``__name__``.
+        level: Level name or number; ``None`` means the configured
+            ``LOG_LEVEL``.
+
+    Returns:
+        The named logger, configured on first use.
+    """
 
     logger = logging.getLogger(name)
     setup_logger(logger, level)

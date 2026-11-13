@@ -1,4 +1,4 @@
-"""The base HTTP/SSE client. See 00-BOUNDARY.md, decision 10."""
+"""The base HTTP/SSE client that each application extends."""
 
 from __future__ import annotations
 

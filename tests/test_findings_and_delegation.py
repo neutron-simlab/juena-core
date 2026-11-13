@@ -37,13 +37,11 @@ class _Recorder(Runnable):
 
 
 def test_only_inputs_and_findings_cross_into_a_specialist() -> None:
-    """A specialist is told it cannot see the conversation. It could.
+    """A specialist is told it cannot see the conversation, so it must not get any.
 
     ``SubAgentMiddleware`` copies the parent's whole state in, and a supervisor
     keeps evicted conversation turns under ``/conversation_history/`` in the
-    same ``files`` channel that carries findings. So the part of the
-    conversation the supervisor had already thrown away was being handed to the
-    one agent whose prompt promises it has no access to any of it.
+    same ``files`` channel that carries findings.
 
     The state handed in is built from scratch rather than filtered, which is
     why ``future_private_field`` is absent without anyone having named it: a
@@ -252,7 +250,7 @@ def _supervisor_brief(description: str):  # noqa: ANN202
 
 
 def test_a_brief_without_the_spec_reaches_the_specialist_with_it() -> None:
-    """The failure seen in the benchmark: "per the user's spec", and no spec."""
+    """A supervisor's brief may say "per the user's spec" and leave the spec out."""
 
     from juena_core.agents.delegation import USER_MESSAGE_NOTE
 

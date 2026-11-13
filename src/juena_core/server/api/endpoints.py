@@ -1,28 +1,13 @@
 """Agent invocation, streaming, resume, thread deletion and artifact download.
 
-**This module has no ``from __future__ import annotations``, deliberately**,
-unlike every other module in the package. ``build_api_router`` annotates the
-``/resume`` body with the resume union the *application* passes in, and FastAPI
-reads that annotation to parse the request. Deferred annotations are strings
-resolved against module globals, where a factory argument does not exist; eager
-ones are evaluated at definition time in the enclosing scope, where it does.
+This module must not use ``from __future__ import annotations``. The
+``/resume`` route annotates its body with the resume union the application
+passes to ``build_api_router``, and FastAPI reads that annotation to parse the
+request. A deferred annotation is a string looked up in the module's globals,
+where that function argument does not exist.
 
-**Why this router is in core at all.** 00-BOUNDARY.md decision 10 says it stays
-in each application, because it imports sandbox, approval and artifact
-behaviour. Two of those are no longer true — artifacts are core's since 01/CP2,
-and approvals are an application-registered interrupt kind since this
-checkpoint — and the third, staging a thread's files somewhere a process can
-read them, is a seam both applications need rather than a reason to keep two
-copies: VITESS binaries read real files from disk exactly as a sandbox mount
-does. Copying the router instead would put the SSE ordering, the ownership
-check, the artifact drain and the thread-event emission in two places that must
-not drift, and 01/CP4's own acceptance check — ``create_app(principal=…)``
-listing ``/stream`` — cannot pass without it. Core's ``BaseAgentClient`` calls
-these paths, so a core that does not define them ships a client with routes
-nobody serves.
-
-So the application supplies what is genuinely its own: its resume union, its
-workspace, its stream policy, and the note closing a staged-input manifest.
+The application passes in what is its own: its resume union, its workspace,
+its stream policy, and the note closing a staged-input manifest.
 """
 
 import asyncio
@@ -93,9 +78,8 @@ __all__ = [
 ]
 
 #: Closing paragraph of a staged-input manifest when an application supplies
-#: none. Deliberately says only what is true everywhere; an application that
-#: wants an agent to *do* something with these paths says so in its own words,
-#: because what the receiving agent can reach differs per application.
+#: none. It says only what is true for every application: what an agent can do
+#: with these paths differs, so an application that wants more passes its own.
 DEFAULT_CLOSING_NOTE = "The user's pasted or uploaded materials are staged under `/inputs`."
 
 
@@ -104,17 +88,19 @@ class ThreadWorkspace:
     """Where a thread's staged files are materialised outside graph state.
 
     Graph state holds a thread's ``/inputs`` files, which is enough for a model
-    that reads them through a file tool. It is not enough for a process that
-    opens them: juena-chatbot copies them into a sandbox mount, and VITESS
-    writes them to disk for the simulation binaries. Core computes the merged
-    file set and calls these; it never learns where they land.
+    that reads them through a file tool, but not for a separate process that
+    opens them, such as a sandbox or a program reading from disk. Core computes
+    the merged file set and calls these; it never learns where the files land.
 
     Both are optional. An application with no such process passes neither.
+
+    Attributes:
+        stage: ``(user_id, thread_id, files) -> None``, awaited before each run.
+        delete: ``(user_id, thread_id) -> None``, awaited when a thread is
+            deleted.
     """
 
-    #: ``(user_id, thread_id, files) -> None``, awaited before each run.
     stage: Callable[..., Awaitable[None]] | None = None
-    #: ``(user_id, thread_id) -> None``, awaited when a thread is deleted.
     delete: Callable[..., Awaitable[None]] | None = None
 
 
@@ -122,11 +108,24 @@ class ThreadActivity:
     """Coordinate thread writers with deletion inside one API process."""
 
     def __init__(self) -> None:
+        """Initialize with no active runs and no deletions."""
+
         self._lock = threading.Lock()
         self._active: dict[str, int] = {}
         self._deleting: set[str] = set()
 
     def reserve_run(self, thread_id: str, *, exclusive: bool = False) -> bool:
+        """Reserve a thread for one run.
+
+        Args:
+            thread_id: The conversation thread.
+            exclusive: Refuse if the thread already has an active run.
+
+        Returns:
+            True if reserved; False if the thread is being deleted, or already
+            running when ``exclusive`` is set.
+        """
+
         with self._lock:
             if thread_id in self._deleting or (exclusive and self._active.get(thread_id, 0)):
                 return False
@@ -134,6 +133,12 @@ class ThreadActivity:
             return True
 
     def release_run(self, thread_id: str) -> None:
+        """Release one run's reservation on a thread.
+
+        Args:
+            thread_id: The conversation thread.
+        """
+
         with self._lock:
             count = self._active.get(thread_id, 0)
             if count <= 1:
@@ -142,6 +147,16 @@ class ThreadActivity:
                 self._active[thread_id] = count - 1
 
     def reserve_delete(self, thread_id: str) -> bool:
+        """Reserve a thread for deletion.
+
+        Args:
+            thread_id: The conversation thread.
+
+        Returns:
+            True if reserved; False if the thread is already being deleted or
+            has an active run.
+        """
+
         with self._lock:
             if thread_id in self._deleting or self._active.get(thread_id, 0):
                 return False
@@ -149,6 +164,12 @@ class ThreadActivity:
             return True
 
     def release_delete(self, thread_id: str) -> None:
+        """End a thread's deletion reservation.
+
+        Args:
+            thread_id: The conversation thread.
+        """
+
         with self._lock:
             self._deleting.discard(thread_id)
 
@@ -191,10 +212,8 @@ def _form_field(value: str | None) -> str | None:
 def _resolve_agent_id(agent_id: str | None) -> str:
     """The agent this request addresses, or the registered default.
 
-    A missing default raises out of here rather than becoming a 404: nothing is
-    missing from the request, the application forgot to import its agent module,
-    and the ``RuntimeError`` naming that is worth more in the log than a 404 is
-    to the caller.
+    A missing default raises ``RuntimeError`` rather than answering 404: the
+    fault is the application's missing agent import, not the request.
     """
 
     return agent_id or get_default_agent()
@@ -202,7 +221,15 @@ def _resolve_agent_id(agent_id: str | None) -> str:
 
 @dataclass(frozen=True)
 class PreparedAgentInvocation:
-    """Prepared agent kwargs plus the effective injected user message."""
+    """Prepared agent kwargs plus the effective injected user message.
+
+    Attributes:
+        kwargs: Keyword arguments for ``agent.astream``: input, config and
+            context.
+        run_id: The id of this run.
+        effective_user_message: The text the user typed; the stream processor
+            uses it to drop the echoed human message.
+    """
 
     kwargs: dict[str, Any]
     run_id: Any
@@ -237,12 +264,12 @@ def build_api_router(
             the principal and requested provider. Read-only routes bypass it.
         invocation_error: Optional mapper for safe application-specific error messages;
             return None to retain the standard error handling.
-        resume_input: The application's discriminated resume union. Core's
-            default is the clarification arm alone, which is the whole truth
-            for an application with no other interrupt kind — a union offering
-            an approval it can never raise would describe a pause that cannot
-            happen.
+        resume_input: The application's discriminated resume union. The
+            default accepts only a clarification reply, for an application
+            with no other interrupt kind.
         workspace: Where staged files are materialised, if anywhere.
+        filesystem: Shared persistent conversation files, if the application
+            has them. Required for binary uploads.
         thread_activity: Guard shared with application routes that can write a
             thread workspace while deletion is in progress.
         stream_policy: Custom event types and silent tools this application's
@@ -250,6 +277,15 @@ def build_api_router(
         closing_note: Last paragraph of a staged-input manifest.
         allowed_suffixes: Legacy text upload extensions this application accepts.
         upload_policy: Optional text/binary upload policy; mutually exclusive with allowed_suffixes.
+        run_controls: Add the run status, steer and stop routes, and allow only
+            one run per thread at a time.
+
+    Returns:
+        The router, ready for ``app.include_router``.
+
+    Raises:
+        ValueError: Both ``upload_policy`` and ``allowed_suffixes`` are given,
+            or binary uploads are allowed without a ``filesystem``.
     """
 
     if upload_policy is not None and allowed_suffixes is not None:
@@ -264,6 +300,7 @@ def build_api_router(
     controls_router = APIRouter()
 
     async def _owned_run(thread_id, run_id, user, session):
+        """Return the caller's live run on their own chat, or answer 404."""
         try:
             await get_owned_chat(session, user.id, thread_id, agent_id=None)
         except ChatNotFoundError as exc:
@@ -297,6 +334,7 @@ def build_api_router(
         router.include_router(controls_router)
 
     def _response(source_factory, thread_id, user_id, lease):
+        """Wrap a run in a response that owns it and releases the thread at the end."""
         if not run_controls:
             return AgentStreamResponse(source_factory(None), on_close=partial(_release_run, thread_id, lease))
         control = runs.create(thread_id=thread_id, user_id=user_id)
@@ -367,6 +405,7 @@ def build_api_router(
         thread_activity.release_run(thread_id)
 
     async def _file_lease(user_id, thread_id):
+        """Take a shared lease on the thread's files, if any; a busy workspace answers 409."""
         if filesystem is None:
             return None
         try:
@@ -383,15 +422,14 @@ def build_api_router(
     ) -> str:
         """Create or authorize a thread and return the id the agent must run on.
 
-        Every invocation entrypoint routes through here, so ownership is
-        enforced in exactly one place. A plain helper rather than a ``Depends``
-        because ``thread_id`` arrives in the request body or form, not the path
-        or query.
+        Every invocation route calls this, so ownership is checked in one
+        place. A plain helper, not a ``Depends``, because ``thread_id`` arrives
+        in the request body or form, not the path or query.
 
-        The agent is checked as well as the owner: resuming a thread under a
-        different graph would hand a checkpoint to a graph whose state channels
-        do not match it. Both mismatches answer *not found*, because telling a
-        caller that a row exists but is not theirs is itself an answer.
+        The agent is checked as well as the owner: running a thread under a
+        different graph would hand it a checkpoint that does not fit its state.
+        Both mismatches answer 404, because saying that a chat exists but is
+        not the caller's already tells them something.
         """
 
         try:
@@ -493,9 +531,9 @@ def build_api_router(
         return PreparedAgentInvocation(
             kwargs=kwargs,
             run_id=run.run_id,
-            # The raw text, not the manifest: the stream processor dedupes the
-            # echoed human message against this, and the message now renders as
-            # what the user typed.
+            # The raw text, not the manifest: the stream processor drops the
+            # echoed human message when it matches this, and that message
+            # displays as what the user typed.
             effective_user_message=message,
         )
 
@@ -549,10 +587,9 @@ def build_api_router(
         if thread_id_used:
             if control is None:
                 yield _sse(events.thread_event(thread_id_used))
-            # A cancelled or crashed previous turn never reached the drain in
-            # the artifact middleware. Clear it here rather than inside the
-            # graph: an approval interrupt makes "graph invocation" a poor proxy
-            # for "turn", so a resume must keep the window this discards.
+            # Discard artifacts a cancelled or crashed previous turn left
+            # undrained. Here, not inside the graph: a turn paused for approval
+            # continues in a second graph run (the resume), which must keep them.
             get_artifact_store().begin_turn(authenticated_user_id, thread_id_used)
 
         # Messages are not persisted here: the checkpointer commits the full
@@ -787,8 +824,7 @@ def build_api_router(
         payload = interrupt_event(interrupt)
         if payload is None:
             return empty
-        # The two slots predate the clarification kind. A client that only knows
-        # approvals still finds one where it always looked.
+        # A client that only knows approvals still finds one under "approval".
         slot = "clarification" if payload["type"] == "clarification_required" else "approval"
         return {**empty, slot: payload}
 

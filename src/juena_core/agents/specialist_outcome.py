@@ -96,7 +96,14 @@ class SpecialistOutcomeState(AgentState):
 
 
 def outcome_verified(message: AIMessage) -> bool:
-    """Return whether the server marked a specialist hand-off as verified."""
+    """Return whether the server marked a specialist hand-off as verified.
+
+    Args:
+        message: The specialist's hand-off message.
+
+    Returns:
+        Whether the message carries the server's verified flag.
+    """
 
     return message.additional_kwargs.get(OUTCOME_VERIFIED_KEY) is True
 
@@ -300,9 +307,23 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
     state_schema = SpecialistOutcomeState
 
     def __init__(self, *, specialist_name: str) -> None:
+        """Initialize the middleware.
+
+        Args:
+            specialist_name: Name shown in the verified block and saved reports.
+        """
         self._specialist_name = specialist_name
 
     def before_agent(self, state: Any, runtime: Any) -> dict[str, Any]:
+        """Record which result artifacts already existed when the run started.
+
+        Args:
+            state: Unused.
+            runtime: The graph runtime, whose context names the user and thread.
+
+        Returns:
+            A state update with the starting artifact ids.
+        """
         identity = _identity(runtime)
         if identity is None:
             return {"specialist_initial_artifact_ids": []}
@@ -310,6 +331,15 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
         return {"specialist_initial_artifact_ids": [ref.artifact_id for ref in refs]}
 
     async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any]:
+        """Async version of :meth:`before_agent`.
+
+        Args:
+            state: Unused.
+            runtime: The graph runtime, whose context names the user and thread.
+
+        Returns:
+            A state update with the starting artifact ids.
+        """
         return self.before_agent(state, runtime)
 
     @hook_config(can_jump_to=["model"])
@@ -320,6 +350,13 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
         One reminder recovers most of them; a second plain answer still fails
         closed in after_agent. Tool calls, interrupts, and call-limit endings
         never reach this point with a plain final message.
+
+        Args:
+            state: The agent state.
+            runtime: Unused.
+
+        Returns:
+            A jump back to the model with the reminder, or ``None``.
         """
         values = state if isinstance(state, Mapping) else {}
         messages = values.get("messages", [])
@@ -342,6 +379,15 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
 
     @hook_config(can_jump_to=["model"])
     async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """Async version of :meth:`after_model`.
+
+        Args:
+            state: The agent state.
+            runtime: Unused.
+
+        Returns:
+            A jump back to the model with the reminder, or ``None``.
+        """
         return self.after_model(state, runtime)
 
     def _own_artifacts(
@@ -367,6 +413,20 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
         return artifacts, store.peek_undelivered(*identity)
 
     def after_agent(self, state: Any, runtime: Any) -> dict[str, Any]:
+        """Replace the specialist's report with the report plus the server's facts.
+
+        The verified block lists the run's executions and new result artifacts,
+        and marks the hand-off unverified when there is no report or every
+        execution failed.
+
+        Args:
+            state: The agent state.
+            runtime: The graph runtime, whose context names the user and thread.
+
+        Returns:
+            A state update with the hand-off message, and the saved report
+            under ``files`` when one was written.
+        """
         values = state if isinstance(state, Mapping) else {}
         try:
             report = SpecialistReport.model_validate(values.get("structured_response"))
@@ -425,8 +485,8 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
     ) -> dict[str, Any]:
         """Keep a real piece of work in `/findings/` so the next task can build on it.
 
-        Whether a finding gets written used to rest on the supervisor asking for
-        one, and a model judging that call skipped it after long research. A
+        The server saves it instead of waiting for the supervisor to ask,
+        because a model left to decide can skip it after long research. A
         report the specialist already filed as its own note, a short lookup, and
         an agent without a `files` channel are left alone.
         """
@@ -447,6 +507,16 @@ class SpecialistOutcomeMiddleware(AgentMiddleware[SpecialistOutcomeState]):
         return {_note_path(report, files): create_file_data(content)}
 
     async def aafter_agent(self, state: Any, runtime: Any) -> dict[str, Any]:
+        """Async version of :meth:`after_agent`.
+
+        Args:
+            state: The agent state.
+            runtime: The graph runtime, whose context names the user and thread.
+
+        Returns:
+            A state update with the hand-off message, and the saved report
+            under ``files`` when one was written.
+        """
         return self.after_agent(state, runtime)
 
 
@@ -456,6 +526,11 @@ class ExecutionEvidenceMiddleware(AgentMiddleware[SpecialistOutcomeState]):
     state_schema = SpecialistOutcomeState
 
     def __init__(self, *, agent_name: str = "supervisor") -> None:
+        """Initialize the middleware.
+
+        Args:
+            agent_name: Name shown in the verified block.
+        """
         self._agent_name = agent_name
 
     @staticmethod
@@ -490,6 +565,16 @@ class ExecutionEvidenceMiddleware(AgentMiddleware[SpecialistOutcomeState]):
         return artifacts
 
     def after_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """Append a verified block to the final answer when this run executed anything.
+
+        Args:
+            state: The agent state.
+            runtime: The graph runtime, whose context names the user, thread
+                and run.
+
+        Returns:
+            A state update with the extended final message, or ``None``.
+        """
         last_ai = _final_ai_message(state)
         graph_run_id = _graph_run_id(runtime)
         if last_ai is None or graph_run_id is None:
@@ -518,6 +603,16 @@ class ExecutionEvidenceMiddleware(AgentMiddleware[SpecialistOutcomeState]):
         state: Any,
         runtime: Any,
     ) -> dict[str, Any] | None:
+        """Async version of :meth:`after_agent`.
+
+        Args:
+            state: The agent state.
+            runtime: The graph runtime, whose context names the user, thread
+                and run.
+
+        Returns:
+            A state update with the extended final message, or ``None``.
+        """
         return self.after_agent(state, runtime)
 
 
@@ -525,6 +620,16 @@ class ArtifactMessageMiddleware(AgentMiddleware):
     """Attach pending artifacts to the root agent's final response."""
 
     def after_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """Claim this turn's artifacts and attach them to the final message.
+
+        Args:
+            state: The agent state.
+            runtime: The graph runtime, whose context names the user and thread.
+
+        Returns:
+            A state update with the final message, or ``None`` when there is
+            nothing to attach.
+        """
         last_ai = _final_ai_message(state)
         if last_ai is None:
             return None
@@ -549,6 +654,16 @@ class ArtifactMessageMiddleware(AgentMiddleware):
         state: Any,
         runtime: Any,
     ) -> dict[str, Any] | None:
+        """Async version of :meth:`after_agent`.
+
+        Args:
+            state: The agent state.
+            runtime: The graph runtime, whose context names the user and thread.
+
+        Returns:
+            A state update with the final message, or ``None`` when there is
+            nothing to attach.
+        """
         return self.after_agent(state, runtime)
 
 
@@ -571,6 +686,12 @@ class ReportWhenToolsRunOutMiddleware(AgentMiddleware):
     REPORT_RESERVE = 10
 
     def __init__(self, tool_call_limit: int) -> None:
+        """Initialize the middleware.
+
+        Args:
+            tool_call_limit: The run's tool-call budget, the same number given to
+                ``ToolCallLimitMiddleware``.
+        """
         super().__init__()
         self.tool_call_limit = tool_call_limit
 
@@ -588,6 +709,15 @@ class ReportWhenToolsRunOutMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
+        """Call the model, leaving only the report open once the budget is nearly spent.
+
+        Args:
+            request: The model request.
+            handler: Calls the model.
+
+        Returns:
+            The model's response.
+        """
         return handler(self._report_only(request))
 
     async def awrap_model_call(
@@ -595,4 +725,13 @@ class ReportWhenToolsRunOutMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Any],
     ) -> ModelResponse:
+        """Async version of :meth:`wrap_model_call`.
+
+        Args:
+            request: The model request.
+            handler: Calls the model.
+
+        Returns:
+            The model's response.
+        """
         return await handler(self._report_only(request))

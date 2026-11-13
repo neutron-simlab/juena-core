@@ -1,26 +1,22 @@
-"""CP0b, rows 4 and 5: a ``@wrap_tool_call`` middleware reads ``request.runtime``
-(state, typed context, and thread_id via execution info), and returning
-``Command(update=...)`` from it writes state *and* the tool message.
+"""A ``@wrap_tool_call`` middleware reads ``request.runtime`` (state, typed
+context, and thread_id via execution info), and returning
+``Command(update=...)`` from it writes state and the tool message.
 
-One thing this found that the plan text did not originally say: the
-decorated function must be **async** (``await handler(request)``) to run
-under ``agent.ainvoke``/``astream`` — a sync ``@wrap_tool_call`` raises
-``NotImplementedError`` there. juena_core's server is async throughout
-(SSE streaming), so every wrap_tool_call middleware it defines must be async.
+The decorated function must be async (``await handler(request)``) to run under
+``agent.ainvoke``/``astream``: a sync ``@wrap_tool_call`` raises
+``NotImplementedError`` there. juena_core's server is async throughout, so
+every wrap_tool_call middleware it defines must be async.
 
-A second finding: ``Command(update={...})`` only persists keys that exist in
-a declared state schema. An undeclared key is silently dropped, not an
-error — this is exactly why 00's `execution_events` channel and 02/CP2's
-`captured`-style fields must be declared via ``state_schema=`` (or the
-agent's own schema), not assumed to "just work" because the middleware wrote
-them.
+``Command(update={...})`` only persists keys that exist in a declared state
+schema. An undeclared key is dropped silently, not raised as an error, so a
+middleware's own fields (such as ``execution_events``) must be declared via
+``state_schema=`` or the agent's own schema.
 
-A third finding: ``request.runtime.context`` is ``None`` when no
-``context_schema``/``context=`` is used, and carries the supplied typed context
-when both are present. The public thread identity a façade tool needs (03/CP3a)
-is ``request.runtime.execution_info.thread_id``. The underlying
-``request.runtime.config["configurable"]["thread_id"]`` carries the matching
-checkpoint key, but application code does not need to reach into it.
+``request.runtime.context`` is ``None`` when no ``context_schema``/``context=``
+is used, and carries the supplied typed context when both are present. A tool
+gets the thread id from ``request.runtime.execution_info.thread_id``. The
+underlying ``request.runtime.config["configurable"]["thread_id"]`` carries the
+matching checkpoint key, but application code does not need to reach into it.
 """
 
 from dataclasses import dataclass
@@ -95,7 +91,7 @@ async def test_middleware_sees_runtime_and_command_writes_state(scratch_mcp_serv
     assert "messages" in seen["state"]
     assert runtime.context == context
     assert runtime.execution_info.thread_id == "cp0b-wrap-tool-call"
-    # This is the underlying checkpoint key, not the façade's preferred API.
+    # The underlying checkpoint key; code should read execution_info instead.
     assert runtime.config["configurable"]["thread_id"] == "cp0b-wrap-tool-call"
 
     # Command(update=...) preserved the tool response and reached the declared channel.

@@ -45,12 +45,32 @@ class ContainerCleanupError(RuntimeError):
 
 
 def default_podman_uri() -> str:
+    """Return the rootless Podman socket of the current user.
+
+    Returns:
+        A ``unix://`` URI under ``/run/user/<uid>``.
+    """
     return f"unix:///run/user/{os.getuid()}/podman/podman.sock"
 
 
 @dataclass(frozen=True, slots=True)
 class SandboxWorkerSettings:
-    """The worker's whole configuration, read once from its environment."""
+    """The worker's whole configuration, read once from its environment.
+
+    Attributes:
+        database_url: The Postgres URL of the job queue.
+        podman_uri: The Podman API socket.
+        image: The container image every command runs in.
+        concurrency: How many jobs run at once, one slot each.
+        cpu_limit: CPUs per container, as a number.
+        memory_limit: Memory per container, such as ``4g``.
+        pid_limit: The most processes a container may start.
+        tmpfs_size: The size of the container's in-memory ``/tmp``.
+        runtime: The OCI runtime to use. None means Podman's default.
+        workspace_root: The folder that holds every conversation's workspace.
+        workspace_limit_bytes: The most a single workspace may hold.
+        idle_ttl_seconds: How long an unused workspace is kept.
+    """
 
     database_url: str
     podman_uri: str
@@ -67,6 +87,14 @@ class SandboxWorkerSettings:
 
     @classmethod
     def from_env(cls) -> SandboxWorkerSettings:
+        """Read the settings from ``SANDBOX_*`` environment variables and ``DATABASE_URL``.
+
+        Returns:
+            The settings, with a default for every variable except ``DATABASE_URL``.
+
+        Raises:
+            RuntimeError: ``DATABASE_URL`` is not set.
+        """
         url = os.getenv("DATABASE_URL", "")
         if not url:
             raise RuntimeError("DATABASE_URL is required")
@@ -92,6 +120,16 @@ class SandboxWorkerSettings:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionOutcome:
+    """How one job ended.
+
+    Attributes:
+        status: ``completed``, ``failed``, ``timed_out`` or ``cancelled``.
+        output: The command's output for the model, with a note on refused files.
+        exit_code: The command's exit code, or None when it is not known.
+        truncated: Whether the output was cut at the job's byte limit.
+        artifact_names: The output files accepted for delivery.
+    """
+
     status: str
     output: str
     exit_code: int | None
@@ -121,11 +159,19 @@ def _artifact_rejection_note(scan: WorkspaceArtifactScan) -> str:
 
 
 class PodmanExecutor:
+    """The worker's container runner: each job gets a fresh, locked-down rootless Podman container."""
+
     def __init__(
         self,
         settings: SandboxWorkerSettings,
         workspaces: WorkspaceStore,
     ) -> None:
+        """Initialize the runner. Call ``connect`` before running jobs.
+
+        Args:
+            settings: The worker's configuration.
+            workspaces: The store that holds the workspace files.
+        """
         self.settings = settings
         self.workspaces = workspaces
         self._client: PodmanClient | None = None
@@ -133,23 +179,36 @@ class PodmanExecutor:
 
     @property
     def client(self) -> PodmanClient:
+        """The connected Podman client.
+
+        Raises:
+            RuntimeError: ``connect`` has not been called.
+        """
         if self._client is None:
             raise RuntimeError("Sandbox worker is not connected to Podman")
         return self._client
 
     def connect(self) -> None:
+        """Open the Podman client."""
         self._client = PodmanClient(
             base_url=self.settings.podman_uri,
             max_pool_size=max(self.settings.concurrency, 10),
         )
 
     def close(self) -> None:
+        """Close the Podman client, ignoring errors."""
         if self._client is not None:
             with suppress(Exception):
                 self._client.close()
             self._client = None
 
     def validate_startup(self) -> None:
+        """Refuse to start unless the worker is safe and able to run jobs.
+
+        Raises:
+            RuntimeError: The worker runs as root, the concurrency is below 1,
+                the Podman socket is unreachable, or the image is missing.
+        """
         if os.geteuid() == 0:
             raise RuntimeError("Sandbox worker refuses to run as root")
         if self.settings.concurrency < 1:
@@ -182,7 +241,7 @@ class PodmanExecutor:
             ],
             "name": f"juena-{job.id.hex}",
             "labels": {MANAGED_LABEL: "true", JOB_ID_LABEL: str(job.id)},
-            # Keep workspace files owned by the host worker and readable by JüNA.
+            # Keep workspace files owned by the host worker and readable by the application.
             "userns_mode": "keep-id",
             "user": str(os.getuid()),
             "network_mode": "none",
@@ -230,6 +289,7 @@ class PodmanExecutor:
 
     @staticmethod
     def _wait_for_exit(container: Any, timeout: int) -> tuple[int | None, bool]:
+        """Wait for the container; return its exit code and whether it is still running."""
         try:
             return container.wait(timeout=timeout), False
         except (APIError, RequestException):
@@ -244,6 +304,7 @@ class PodmanExecutor:
 
     @staticmethod
     def _read_logs(container: Any, max_bytes: int) -> tuple[bytes, bool]:
+        """Read up to ``max_bytes`` of output; return it and whether more was cut off."""
         buffer = bytearray()
         truncated = False
         frames: Iterator[bytes] = container.logs(
@@ -263,6 +324,19 @@ class PodmanExecutor:
         return bytes(buffer), truncated
 
     def run(self, job: SandboxJobRecord, *, cancelled: Callable[[], bool] | None = None) -> ExecutionOutcome:
+        """Run one claimed job while holding its workspace's locks.
+
+        Args:
+            job: The claimed job.
+            cancelled: Asked before the start and about once a second while the
+                job runs; True stops the container. None means it cannot be stopped.
+
+        Returns:
+            How the job ended, with its output and accepted files.
+
+        Raises:
+            ContainerCleanupError: The finished container could not be removed.
+        """
         with (
             self.workspaces.guard(job.workspace_id, operation=True, shared=True, blocking=True),
             self.workspaces.guard(job.workspace_id, execution=True, blocking=True),
@@ -348,6 +422,7 @@ class PodmanExecutor:
 
     @staticmethod
     def _remove(container: Any) -> None:
+        """Force-remove a container; raise ``ContainerCleanupError`` if Podman fails."""
         try:
             container.remove(force=True)
         except NotFound:
@@ -356,7 +431,14 @@ class PodmanExecutor:
             raise ContainerCleanupError("Failed to remove managed sandbox container") from exc
 
     def remove_all(self) -> int:
-        """Force-remove every managed container. Only one worker ever runs."""
+        """Force-remove every managed container. Only one worker ever runs.
+
+        Returns:
+            How many containers were removed.
+
+        Raises:
+            ContainerCleanupError: A container could not be removed.
+        """
 
         removed = 0
         for container in self.client.containers.list(

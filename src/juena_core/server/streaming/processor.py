@@ -51,18 +51,18 @@ class StreamPolicy:
     Every field names things core cannot know, and every one defaults to empty
     so a core-only application streams correctly without declaring anything.
 
-    ``custom_event_types`` is an allowlist, not a filter: the ``custom`` stream
-    mode carries whatever any middleware or library chose to write, so
-    forwarding by default would put internal payloads on a user's wire.
-
-    ``silent_tools`` are tools whose output never reaches the client, not even
-    when ``STREAM_TOOL_PAYLOADS`` is on for debugging. Their step is still
-    listed in the activity log, as every tool's is, without the output.
-    juena-chatbot lists its sandbox ``execute``, whose stdout may be very large
-    or binary-like.
-
-    ``tool_labels`` describe the application's own tools in the activity log;
-    see :mod:`juena_core.server.streaming.tool_labels`.
+    Attributes:
+        custom_event_types: Payload types forwarded from the ``custom`` stream
+            mode. An allowlist, not a filter: that mode carries whatever any
+            middleware or library chose to write, so forwarding by default
+            would put internal payloads on a user's wire.
+        silent_tools: Tools whose output never reaches the client, not even
+            when ``STREAM_TOOL_PAYLOADS`` is on for debugging. Their step is
+            still listed in the activity log, as every tool's is, without the
+            output. A sandbox ``execute`` tool, whose output may be very large
+            or binary-like, is a typical entry.
+        tool_labels: Lines describing the application's own tools in the
+            activity log; see :mod:`juena_core.server.streaming.tool_labels`.
     """
 
     custom_event_types: frozenset[str] = field(default_factory=frozenset)
@@ -96,6 +96,21 @@ class StreamEventProcessor:
         ignored_interrupt_ids: set[str] | None = None,
         policy: StreamPolicy | None = None,
     ) -> None:
+        """Initialize a processor for one run.
+
+        Args:
+            agent: The compiled graph being streamed.
+            config: The run's config.
+            run_id: The run's id, set on every message sent.
+            user_input_message: The text the user typed; the echoed human
+                message that matches it is not sent back.
+            include_tool_payloads: Also send tool results as messages, for
+                debugging.
+            ignored_interrupt_ids: Interrupts not to announce, such as the one
+                being resumed.
+            policy: The application's stream policy.
+        """
+
         self.agent = agent
         self.config = config
         self.run_id = run_id
@@ -140,7 +155,17 @@ class StreamEventProcessor:
         return events.status_event(phase, label, **extra)
 
     async def process_event(self, stream_event: Any) -> AsyncGenerator[dict[str, Any], None]:
-        """Process one stream event, yielding SSE payload dicts."""
+        """Process one stream event, yielding SSE payload dicts.
+
+        A failure while processing becomes an ``error`` payload instead of
+        ending the stream.
+
+        Args:
+            stream_event: One event from ``agent.astream``.
+
+        Yields:
+            The payloads the client should receive for this event.
+        """
 
         try:
             stream_mode, event, node_path = self._parse_stream_event(stream_event)
@@ -200,7 +225,7 @@ class StreamEventProcessor:
 
             # Summarization deletes old turns by emitting `RemoveMessage` into
             # the same stream. It is an instruction to the state, not something
-            # a person reads, and rendering it raised an error the user saw
+            # a person reads, and rendering it would show the user an error
             # instead of their answer.
             if isinstance(message, RemoveMessage):
                 return

@@ -1,5 +1,4 @@
-"""Connection, checkpointer, store and models. See 00-BOUNDARY.md, *Moves
-whole* and decision 9 part 4."""
+"""Connection, checkpointer, store and models."""
 
 from __future__ import annotations
 

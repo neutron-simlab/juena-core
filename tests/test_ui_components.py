@@ -1,20 +1,8 @@
 """Behaviour of the reusable Streamlit renderers.
 
-Moved here from juena-chatbot in plan 02/step 3. Every function driven below
-lives in ``juena_core.ui.components``: these render a ``ChatMessage``, an
-artifact or a streamed token, and those are shapes core's own server defines,
-so core is the one place that has to agree with them. juena-chatbot's
-``app/ui_components.py`` re-exports them and keeps only the logo, the header
-and the chat-input CSS -- which is why nothing was left behind here. That the
-page calls the header at all is asserted from ``test_chat_interface``.
-
-``test_ui_contracts.py`` holds the coarser contracts CP5 wrote for the same
-module. Two of those were replaced by this file rather than kept beside it:
-``test_sanitize_assistant_content_removes_unrenderable_local_images`` is
-covered at finer grain by ``..._removes_invented_sandbox_image`` together with
-``..._preserves_a_real_image``, and ``test_artifact_history_fetch_uses_the_session_client``
-is the same test as ``test_render_artifact_history_fetches_through_authenticated_client``
-below.
+Every function driven below lives in ``juena_core.ui.components``: these
+render a ``ChatMessage``, an artifact or a streamed token, and those are shapes
+core's own server defines, so core is the one place that has to agree with them.
 """
 
 import base64

@@ -57,13 +57,20 @@ def _compact_summary(text: str, *, max_chars: int = 500) -> str:
 def extract_pasted_code_context(message: str) -> PastedCodeContext | None:
     """Extract code and errors from fenced blocks in typed chat text.
 
-    Only ``` fenced blocks count. Guessing at unfenced text used to misread
-    ordinary prose as code -- "What does the Error: message in the manual mean?"
-    was staged as a traceback -- which silently reframed the whole turn. A fence
-    is something the user types deliberately, so it is the signal we trust.
+    Only ``` fenced blocks count. Guessing at unfenced text misreads ordinary
+    prose as code ("What does the Error: message in the manual mean?" looks like
+    a traceback), which silently reframes the whole turn. A fence is something
+    the user types on purpose.
 
-    Unfenced text is not staged, but nothing is lost from the conversation: the
-    message still reaches the agent verbatim.
+    Unfenced text is not staged, but the message still reaches the agent
+    verbatim.
+
+    Args:
+        message: The text the user typed.
+
+    Returns:
+        The extracted code, errors and remaining goal text, or None when the
+        message has no non-empty fenced block.
     """
 
     if not message.strip():
@@ -81,8 +88,8 @@ def extract_pasted_code_context(message: str) -> PastedCodeContext | None:
         body = block.group("body").strip("\n")
         (error_bodies if _block_is_error(body) else code_bodies).append(body)
 
-    # The fence's language tag is now the only language signal, and it is the one
-    # `staged_code_path` was built for.
+    # The first fence with a language tag sets the staged code file's suffix
+    # (see `staged_code_path`).
     language = next(
         (
             block.group("lang").strip().lower()
@@ -103,7 +110,15 @@ def extract_pasted_code_context(message: str) -> PastedCodeContext | None:
 
 
 def staged_code_path(context: PastedCodeContext) -> str:
-    """Return the canonical staged code path for extracted inline code."""
+    """Return the canonical staged code path for extracted inline code.
+
+    Args:
+        context: The pasted code; its language picks the file suffix.
+
+    Returns:
+        ``/inputs/current_code`` plus the language's suffix, or ``.txt`` when
+        the language is unknown.
+    """
 
     suffix = ".txt"
     if context.language:
@@ -112,6 +127,16 @@ def staged_code_path(context: PastedCodeContext) -> str:
 
 
 def is_persistent_input_path(path: str) -> bool:
+    """Whether a staged path is kept from one turn to the next.
+
+    Args:
+        path: A path under ``/inputs``.
+
+    Returns:
+        True for uploads and the uploads manifest; other staged files last
+        one turn.
+    """
+
     return path.startswith(UPLOADS_PREFIX) or path == UPLOADS_MANIFEST_PATH
 
 
@@ -132,7 +157,17 @@ def build_uploads_manifest(
     existing_upload_paths: Sequence[str],
     new_uploads: Sequence[UploadedAttachment],
 ) -> tuple[str, str | None] | None:
-    """Create or update the persistent thread upload manifest."""
+    """Create or update the persistent thread upload manifest.
+
+    Args:
+        existing_files: The thread's current ``/inputs`` files.
+        existing_upload_paths: Upload paths staged in earlier turns.
+        new_uploads: Uploads accepted this turn.
+
+    Returns:
+        The manifest text and the manifest's original creation time, or None
+        when there is nothing to list or add.
+    """
 
     existing_manifest = existing_files.get(UPLOADS_MANIFEST_PATH)
     created_at = None
@@ -215,9 +250,19 @@ def build_inputs_manifest(
 ) -> str:
     """Build the short staged-input manifest injected into agent history.
 
-    ``closing_note`` is the last paragraph, and it is the application's: it
-    tells *this* agent what to do with staged paths, and what a supervisor can
-    reach differs per application. Core has no sentence to offer there.
+    Args:
+        raw_message: The text the user typed.
+        attachments: Uploads accepted this turn.
+        pasted_context: Code and errors pasted in fences, if any.
+        has_thread_uploads: Whether the thread has persistent uploads.
+        closing_note: The last paragraph. It comes from the application,
+            because what an agent can do with the staged paths differs per
+            application.
+        uploads_prefix: Where uploads live; replaces ``/inputs/uploads/``
+            throughout the text.
+
+    Returns:
+        The manifest the model reads in place of the typed message.
     """
 
     summary = pasted_context.user_goal if pasted_context and pasted_context.user_goal else raw_message

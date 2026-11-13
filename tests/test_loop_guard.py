@@ -105,7 +105,7 @@ def test_the_first_call_of_a_run_is_never_blocked() -> None:
 
 @pytest.mark.asyncio
 async def test_the_async_path_refuses_a_repeat_too() -> None:
-    """The server runs `ainvoke`, so the sync-only tests proved nothing about it."""
+    """The server runs `ainvoke`, which the sync tests above do not reach."""
 
     middleware = RepeatedToolCallMiddleware()
     previous = _call("read_file", {"file_path": "/a.dat"}, "a")
@@ -154,9 +154,8 @@ def test_one_refusal_is_a_nudge_and_does_not_end_the_run() -> None:
 def test_a_second_refusal_ends_the_run() -> None:
     """Two ignored refusals are evidence the message is not landing.
 
-    The live failure this replaces: one `read_file` re-issued 60 times after it
-    had already succeeded, each refusal costing a model call and changing
-    nothing. Three identical calls is the new ceiling.
+    Each refusal costs a model call and changes nothing; a live run re-issued
+    one successful `read_file` 60 times. Three identical calls is the ceiling.
     """
     middleware = RepeatedToolCallMiddleware()
     messages = [*_history(_call("read_file", {"file_path": "/a.dat"}, "a"))]
@@ -196,10 +195,9 @@ def test_refusals_from_earlier_in_a_healthy_run_do_not_accumulate() -> None:
 
 @pytest.mark.asyncio
 async def test_a_locked_model_is_stopped_rather_than_argued_with() -> None:
-    """End to end, through a real graph, because the parts were never the problem.
+    """End to end, through a real graph, with a model that keeps repeating itself.
 
-    Every unit above passed while the live system burned 59 model calls on one
-    repeated read. What was missing was a test that let a model keep going.
+    The unit tests above can all pass while the assembled run still loops.
     """
     from langchain.agents import create_agent
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel

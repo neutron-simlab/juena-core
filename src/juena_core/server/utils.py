@@ -51,6 +51,12 @@ def message_text(message: BaseMessage) -> str:
     ``BaseMessage.text`` concatenates the text blocks of any content shape --
     plain string, list of strings, or list of typed blocks -- and ignores
     non-text blocks such as reasoning or images.
+
+    Args:
+        message: Any LangChain message.
+
+    Returns:
+        The message's text.
     """
 
     return message.text
@@ -62,6 +68,12 @@ def reasoning_from(message: BaseMessage) -> str:
     Uses ``content_blocks``, which normalises each provider's native reasoning
     representation into a common ``{"type": "reasoning", "reasoning": ...}``
     shape.
+
+    Args:
+        message: Any LangChain message.
+
+    Returns:
+        The reasoning text, or "" when there is none or it cannot be read.
     """
 
     try:
@@ -85,6 +97,12 @@ def display_text_from(message: BaseMessage) -> str:
     the user actually typed is preserved alongside it, so prefer that when it is
     present -- otherwise a reloaded chat renders agent scaffolding in the user's
     own bubble.
+
+    Args:
+        message: Any LangChain message.
+
+    Returns:
+        The text the user typed, if recorded; otherwise the message's text.
     """
 
     original = message.additional_kwargs.get(DISPLAY_TEXT_KEY)
@@ -94,7 +112,14 @@ def display_text_from(message: BaseMessage) -> str:
 
 
 def display_attachments_from(message: BaseMessage) -> list[dict[str, object]]:
-    """Return the upload metadata recorded on *message*, or [] when there is none."""
+    """Return the upload metadata recorded on *message*, or [] when there is none.
+
+    Args:
+        message: Any LangChain message.
+
+    Returns:
+        One dict per recorded upload.
+    """
 
     attachments = message.additional_kwargs.get(DISPLAY_ATTACHMENTS_KEY)
     if not isinstance(attachments, list):
@@ -110,13 +135,30 @@ def answer_text_from(message: BaseMessage) -> str:
     the answer before the block exists, so the user never sees it there; a
     reloaded thread reads the checkpointed message, block included, and would
     otherwise render the full execution log under the answer.
+
+    Args:
+        message: An AI message.
+
+    Returns:
+        The answer text without the evidence block.
     """
 
     return _VERIFIED_BLOCK.sub("", message_text(message))
 
 
 def langchain_to_chat_message(message: BaseMessage) -> ChatMessage:
-    """Create a :class:`ChatMessage` from a LangChain message."""
+    """Create a :class:`ChatMessage` from a LangChain message.
+
+    Args:
+        message: A human, AI, tool, system or custom chat message.
+
+    Returns:
+        The message in the shape the UI renders.
+
+    Raises:
+        ValueError: The message type or role is not supported, or a custom
+            message's content is not a dict or a list of dicts.
+    """
 
     message_id = getattr(message, "id", None)
 

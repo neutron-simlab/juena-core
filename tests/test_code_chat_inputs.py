@@ -173,16 +173,14 @@ async def test_prepare_code_chat_turn_inputs_reminds_about_existing_thread_uploa
 @pytest.mark.parametrize(
     "message",
     [
-        # Prose that used to be staged as a traceback because ERROR_LINE_RE ended
-        # in a bare `Error:` alternative.
+        # Prose a bare `Error:` pattern would mistake for a traceback.
         "What does the Error: message in the manual mean?",
-        # Prose that used to be staged as code because any line containing one of
-        # `[{}();]` counted as code-like.
+        # Prose that treating any of `[{}();]` as code-like would mistake for code.
         "Can you (please) explain how the detector works?",
         "How do I normalise SANS data?",
-        # An unfenced traceback is no longer staged either -- the accepted cost of
-        # trusting only what the user marked deliberately. It still reaches the
-        # agent verbatim in the message.
+        # An unfenced traceback is not staged either: only what the user fenced
+        # deliberately is trusted. It still reaches the agent verbatim in the
+        # message.
         'Traceback (most recent call last):\n  File "run.py", line 12\nValueError: bad',
     ],
 )
@@ -213,8 +211,8 @@ def test_fenced_traceback_is_staged_as_an_error() -> None:
 
 
 def test_fenced_js_stack_trace_is_detected() -> None:
-    """The `^`-anchored alternatives only matched at string start before
-    re.MULTILINE was set, so JS/Java traces went unrecognised."""
+    """Without re.MULTILINE the `^`-anchored alternatives match only at string
+    start, and JS/Java traces go unrecognised."""
     context = code_chat_utils.extract_pasted_code_context(
         "```\n  at foo (bar.js:10)\n  at baz (bar.js:22)\n```"
     )

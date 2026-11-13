@@ -1,13 +1,12 @@
 """Authenticated, user-owned chat history API.
 
-Thread deletion lives on ``DELETE /threads/{thread_id}`` in
-:mod:`juena_core.server.api.endpoints`; it is not duplicated here.
+Thread deletion is ``DELETE /threads/{thread_id}`` in
+:mod:`juena_core.server.api.endpoints`.
 
-The router is built by a factory rather than declared at module scope, because
-the identity dependency is the application's: juena-chatbot passes a SAML-backed
-one, VITESS v2 passes :func:`~juena_core.server.identity.local_principal`. The
-dependency is then visible in each route's signature instead of hidden in a
-dictionary mutation at startup.
+The router is built by a factory because the identity dependency is the
+application's: a sign-in provider's, or
+:func:`~juena_core.server.identity.local_principal`. The dependency then shows
+in each route's signature.
 """
 
 from contextlib import nullcontext
@@ -36,7 +35,17 @@ __all__ = ["build_chat_router"]
 
 
 def build_chat_router(principal: PrincipalDependency, *, filesystem: ConversationFilesystem | None = None) -> APIRouter:
-    """Build the ``/chats`` router against one application's identity provider."""
+    """Build the ``/chats`` router against one application's identity provider.
+
+    Args:
+        principal: The identity dependency every route authenticates with.
+        filesystem: Shared persistent conversation files, if the application
+            has them. Used to refuse a deleted conversation and to guard
+            creation.
+
+    Returns:
+        The ``/chats`` router.
+    """
 
     router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -49,9 +58,8 @@ def build_chat_router(principal: PrincipalDependency, *, filesystem: Conversatio
     ) -> list[dict]:
         """List the caller's conversations, newest first.
 
-        ``agent_id`` narrows the list to one agent. Omitting it lists them all,
-        which shows more rather than granting more — every row is already the
-        caller's own.
+        ``agent_id`` narrows the list to one agent. Omitting it lists them all;
+        every row is still the caller's own.
         """
 
         chats = await list_owned_chats(session, user.id, agent_id=agent_id, limit=limit)

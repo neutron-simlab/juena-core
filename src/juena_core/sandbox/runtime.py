@@ -53,6 +53,8 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class _SandboxIdentity:
+    """Who a sandbox call runs for, with their hashed tenant and workspace ids."""
+
     user_id: str
     thread_id: str
     run_id: str | None
@@ -61,6 +63,7 @@ class _SandboxIdentity:
 
     @classmethod
     def from_runtime(cls, runtime: Any) -> "_SandboxIdentity":
+        """Read the identity from the graph runtime; raise ``RuntimeError`` if it is incomplete."""
         context = getattr(runtime, "context", None)
         user_id = _context_value(context, "user_id")
         thread_id = _context_value(context, "thread_id")
@@ -92,6 +95,12 @@ _workspace_store: WorkspaceStore | None = None
 
 
 def get_workspace_store() -> WorkspaceStore:
+    """Return the store that holds workspace files.
+
+    Returns:
+        The shared conversation filesystem's store when one is configured,
+        otherwise one built from the sandbox settings.
+    """
     global _workspace_store
     if get_filesystem() is not None:
         return get_filesystem().store
@@ -106,6 +115,11 @@ def get_workspace_store() -> WorkspaceStore:
 
 
 def set_workspace_store_for_tests(store: WorkspaceStore | None) -> None:
+    """Replace the cached workspace store, for tests.
+
+    Args:
+        store: The store to use, or None to build a new one on next use.
+    """
     global _workspace_store
     _workspace_store = store
 
@@ -118,6 +132,15 @@ _jobs_lock = threading.Lock()
 
 
 def get_sandbox_jobs() -> SandboxJobs:
+    """Return the application's job queue, opening it on first use.
+
+    Returns:
+        The queue shared by every request in this process.
+
+    Raises:
+        RuntimeError: The sandbox is not configured or not enabled, or
+            ``DATABASE_URL`` is not set.
+    """
     global _jobs
     if _jobs is not None:
         return _jobs
@@ -139,11 +162,17 @@ def get_sandbox_jobs() -> SandboxJobs:
 
 
 def set_sandbox_jobs_for_tests(jobs: SandboxJobs | None) -> None:
+    """Replace the shared job queue, for tests.
+
+    Args:
+        jobs: The queue to use, or None to open a new one on next use.
+    """
     global _jobs
     _jobs = jobs
 
 
 def close_sandbox_jobs() -> None:
+    """Close the shared job queue if it is open."""
     global _jobs
     if _jobs is not None:
         _jobs.close()
@@ -152,7 +181,11 @@ def close_sandbox_jobs() -> None:
 
 @asynccontextmanager
 async def sandbox_lifespan() -> AsyncGenerator[None, None]:
-    """Close the lazily opened application-side queue during API shutdown."""
+    """Close the lazily opened application-side queue during API shutdown.
+
+    Yields:
+        Control while the API runs.
+    """
 
     try:
         yield
@@ -165,6 +198,7 @@ class RuntimePodmanSandboxBackend(BaseSandbox):
 
     @staticmethod
     def _resolve() -> PodmanSandboxBackend:
+        """Build the backend for the conversation of the running graph."""
         runtime = get_runtime()
         identity = _SandboxIdentity.from_runtime(runtime)
         control = control_from(runtime.context)
@@ -182,15 +216,41 @@ class RuntimePodmanSandboxBackend(BaseSandbox):
 
     @property
     def id(self) -> str:
+        """The current conversation's workspace id."""
         return self._resolve().id
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        """Run a command in the current conversation's sandbox.
+
+        Args:
+            command: The shell command to run.
+            timeout: Seconds to allow. None means the configured limit.
+
+        Returns:
+            The command's result, as :meth:`PodmanSandboxBackend.execute` gives it.
+        """
         return self._resolve().execute(command, timeout=timeout)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        """Write files into the current conversation's workspace.
+
+        Args:
+            files: ``(path, content)`` pairs.
+
+        Returns:
+            One response per file, in order.
+        """
         return self._resolve().upload_files(files)
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Read files from the current conversation's workspace.
+
+        Args:
+            paths: The files to read.
+
+        Returns:
+            One response per path, in order.
+        """
         return self._resolve().download_files(paths)
 
 
@@ -200,16 +260,31 @@ def build_sandbox_backend(
     skills_dir: Path | None,
     has_skills: bool,
 ) -> CompositeBackend:
+    """Build a specialist's backend: the sandbox by default, plus read-only routes.
+
+    Args:
+        repo_cache_root: Folder of cloned repositories served at ``/repos/``, or None.
+        skills_dir: Folder of skills served at ``/skills/``, or None.
+        has_skills: Whether ``skills_dir`` holds any skills; ``/skills/`` is
+            mounted only then.
+
+    Returns:
+        A backend that runs commands in the sandbox and keeps findings in graph
+        state. With the shared conversation filesystem, ``/workspace/`` and
+        ``/inputs/`` are served from it.
+
+    Raises:
+        RuntimeError: Sandbox execution is not enabled.
+    """
     if not sandbox_enabled():
         raise RuntimeError("Cannot build a sandbox backend while SANDBOX_ENABLED is false")
 
     sandbox = RuntimePodmanSandboxBackend()
     routes: dict[str, Any] = {
         "/inputs/": ReadOnlySandboxInputsBackend(sandbox),
-        # Graph state, never the container. The sandbox root is read-only, so a
-        # specialist writing here got `Errno 30: Read-only file system`; and even
-        # a writable container would hide findings from a background specialist,
-        # which runs with no sandbox at all.
+        # Graph state, never the container: the sandbox root is read-only
+        # (`Errno 30: Read-only file system`), and a background specialist runs
+        # with no sandbox at all, so it could not see findings stored there.
         FINDINGS_PREFIX: FindingsStateBackend(),
     }
     if get_filesystem() is not None:
@@ -243,6 +318,19 @@ async def stage_runtime_inputs(
     thread_id: str,
     files: dict[str, Any],
 ) -> None:
+    """Copy a run's ``/inputs/`` files into the conversation's workspace.
+
+    Does nothing when neither the shared conversation filesystem nor the
+    sandbox is enabled.
+
+    Args:
+        user_id: The signed-in user.
+        thread_id: The conversation.
+        files: The run's files by path; only those under ``/inputs/`` are staged.
+
+    Raises:
+        RuntimeError: The workspace is busy, or the sandbox identity secret is missing.
+    """
     filesystem = get_filesystem()
     if filesystem is not None:
         thread_files = filesystem.for_thread(user_id, thread_id)
@@ -282,6 +370,18 @@ async def stage_runtime_inputs(
 
 
 async def delete_runtime_workspace(*, user_id: str, thread_id: str) -> None:
+    """Delete the conversation's sandbox workspace, unless a job is using it.
+
+    Does nothing with the shared conversation filesystem or with the sandbox
+    disabled.
+
+    Args:
+        user_id: The signed-in user.
+        thread_id: The conversation.
+
+    Raises:
+        RuntimeError: The sandbox identity secret is missing.
+    """
     if get_filesystem() is not None:
         return
     if not sandbox_enabled():

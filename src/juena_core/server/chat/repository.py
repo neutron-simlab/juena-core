@@ -1,22 +1,19 @@
 """User-owned chat persistence operations.
 
-Ownership metadata lives in the ``chats`` table. Message history is *not*
-duplicated here: the LangGraph checkpointer already stores every message for a
-thread, so :func:`load_thread_messages` reads it back from there.
+The ``chats`` table holds who owns a conversation, never what was said in it.
+The LangGraph checkpointer already stores every message of a thread, so
+:func:`load_thread_messages` reads history from there.
 
-Every lookup is scoped by owner **and** by agent. A thread belongs to one
-registered graph, and resuming it under another would hand a checkpoint to a
-graph whose state channels do not match it. Both mismatches raise
-:class:`ChatNotFoundError` rather than a distinct "forbidden" error, because
-telling a caller that a row exists but is not theirs is itself an answer.
-
-:func:`load_thread_messages` is the one function here that reads *content*
-rather than ownership. It goes to the checkpointer, not to a table: the
-``chats`` row carries who owns a conversation, never what was said in it.
+Lookups are scoped by owner, and by agent when one is given. A thread belongs
+to one registered graph, and resuming it under another would hand that graph a
+checkpoint that does not fit its state. Both mismatches raise
+:class:`ChatNotFoundError`, not a "forbidden" error, because saying that a chat
+exists but is not the caller's already tells them something.
 """
 
 from __future__ import annotations
 
+import re
 from uuid import UUID, uuid4
 
 from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
@@ -43,6 +40,14 @@ __all__ = [
 ]
 
 
+#: What a client may name a new conversation: letters, digits, ``-`` and ``_``,
+#: which covers the UUIDs the UI generates. The checkpointer keys state by this
+#: name, and an application may also checkpoint work no user owns under
+#: prefixed names (such as ``research:<job id>``), so a new conversation must
+#: not be able to spell one of those.
+_NEW_THREAD_ID = re.compile(r"[A-Za-z0-9_-]{1,255}")
+
+
 class ChatNotFoundError(LookupError):
     """Raised for missing chats, and for chats owned by another user or agent."""
 
@@ -58,7 +63,24 @@ async def ensure_owned_chat(
     agent_id: str,
     *, filesystem: ConversationFilesystem | None = None,
 ) -> Chat:
-    """Create a chat or verify ownership without revealing other users' rows."""
+    """Create a chat or verify ownership without revealing other users' rows.
+
+    Args:
+        session: The database session. A new row is flushed, not committed.
+        user_id: The caller's id.
+        thread_id: The conversation thread. None creates a new one.
+        agent_id: The agent the request addresses.
+        filesystem: Shared persistent conversation files, used to refuse a
+            deleted conversation.
+
+    Returns:
+        The caller's chat row.
+
+    Raises:
+        ChatDeletedError: The conversation was deleted.
+        ChatNotFoundError: The chat belongs to another user or agent, or a new
+            thread id is not an allowed name.
+    """
 
     effective_thread_id = thread_id or str(uuid4())
     if filesystem is not None:
@@ -67,6 +89,10 @@ async def ensure_owned_chat(
             raise ChatDeletedError(effective_thread_id)
     chat = await session.get(Chat, effective_thread_id)
     if chat is None:
+        # Checked only when creating: a conversation that already exists keeps
+        # working whatever it was named.
+        if not _NEW_THREAD_ID.fullmatch(effective_thread_id):
+            raise ChatNotFoundError(effective_thread_id)
         chat = Chat(thread_id=effective_thread_id, user_id=user_id, agent_id=agent_id)
         session.add(chat)
         await session.flush()
@@ -84,12 +110,22 @@ async def get_owned_chat(
 ) -> Chat:
     """Load one chat the caller owns, requiring a matching agent when given one.
 
-    ``agent_id`` accepts ``None`` — renaming a conversation is addressed by
-    thread alone, and those routes carry no agent in their path — but it has
-    **no default**, so every call site states which it is. A default would let
-    a route that runs a graph skip the check by omission, which is the
-    cross-agent resume this column exists to prevent, and it would pass every
-    test that did not probe for it specifically.
+    Args:
+        session: The database session.
+        user_id: The caller's id.
+        thread_id: The conversation thread.
+        agent_id: The agent the chat must belong to. ``None`` skips that check,
+            for routes addressed by thread alone, such as renaming a
+            conversation. It has no default, so every call site states which
+            it means: a default would let a route that runs a graph skip the
+            agent check by omission.
+
+    Returns:
+        The chat row.
+
+    Raises:
+        ChatNotFoundError: The caller owns no such chat, or it belongs to
+            another agent.
     """
 
     conditions = [Chat.thread_id == thread_id, Chat.user_id == user_id]
@@ -111,9 +147,16 @@ async def list_owned_chats(
 ) -> list[Chat]:
     """List the caller's chats, newest first, optionally for one agent only.
 
-    Here ``agent_id`` *does* default to ``None``: listing everything shows too
-    much rather than granting anything, so an omission is a display choice,
-    not a hole.
+    Args:
+        session: The database session.
+        user_id: The caller's id.
+        agent_id: Only this agent's chats. Here it defaults to ``None`` (every
+            agent): that only shows more of the caller's own rows, and grants
+            nothing.
+        limit: The most chats to return.
+
+    Returns:
+        The chat rows, most recently updated first.
     """
 
     conditions = [Chat.user_id == user_id]
@@ -131,9 +174,15 @@ async def list_owned_chats(
 async def load_thread_messages(thread_id: str) -> list[ChatMessage]:
     """Read a thread's message history from the LangGraph checkpointer.
 
-    The checkpointer is the single source of truth for conversation content.
-    Callers must verify ownership of ``thread_id`` before calling this — this
-    function takes no user, and would happily read anyone's thread.
+    Callers must check ownership of ``thread_id`` first: this function takes
+    no user and reads anyone's thread.
+
+    Args:
+        thread_id: The conversation thread.
+
+    Returns:
+        The transcript as the UI shows it; empty when the thread has no
+        checkpoint.
     """
 
     checkpoint = await get_checkpointer().aget({"configurable": {"thread_id": thread_id}})
@@ -187,6 +236,12 @@ def chat_to_dict(chat: Chat) -> dict[str, str]:
 
     ``agent_id`` is part of the payload so a UI can restore the mode a
     conversation belongs to instead of inferring it from whatever is selected.
+
+    Args:
+        chat: The chat row.
+
+    Returns:
+        The chat's thread id, agent, title, summary and timestamps.
     """
 
     return {

@@ -20,6 +20,19 @@ class SandboxRuntimeSettings:
     Worker-only limits are read by ``SandboxWorkerSettings`` in ``executor``.
     Values repeated here must match the worker deployment; the API uses them
     for admission, timeouts, and the human approval card.
+
+    Attributes:
+        enabled: Whether the application offers sandbox execution at all.
+        identity_secret: The key that turns user and thread ids into tenant and
+            workspace ids. At least 32 characters when ``enabled``.
+        workspace_root: The folder that holds every conversation's workspace.
+        concurrency: How many jobs may be active at once; more are refused as busy.
+        execution_timeout_seconds: The longest a single command may run.
+        max_output_bytes: How much of a command's output is kept.
+        workspace_limit_bytes: The most a single workspace may hold.
+        idle_ttl_seconds: How long an unused workspace is kept.
+        cpu_limit: The CPU limit shown on the approval card.
+        memory_limit: The memory limit shown on the approval card.
     """
 
     enabled: bool
@@ -60,6 +73,13 @@ def configure_sandbox(settings_: SandboxRuntimeSettings) -> None:
     Importing the optional ORM model here attaches ``sandbox_jobs`` to core's
     metadata before ``create_app`` runs ``create_all``. An application that
     never enables this feature never imports the model or creates the table.
+
+    Args:
+        settings_: The settings to install.
+
+    Raises:
+        ValueError: A setting is out of range.
+        RuntimeError: Different settings were installed already.
     """
 
     _validate(settings_)
@@ -72,7 +92,14 @@ def configure_sandbox(settings_: SandboxRuntimeSettings) -> None:
 
 
 def sandbox_settings() -> SandboxRuntimeSettings:
-    """Return configured settings, failing clearly when execution was not wired."""
+    """Return the installed sandbox settings.
+
+    Returns:
+        The settings passed to ``configure_sandbox``.
+
+    Raises:
+        RuntimeError: ``configure_sandbox`` has not been called.
+    """
 
     if _sandbox_settings is None:
         raise RuntimeError("configure_sandbox() has not been called")
@@ -80,6 +107,10 @@ def sandbox_settings() -> SandboxRuntimeSettings:
 
 
 def sandbox_enabled() -> bool:
-    """Return whether an explicitly configured sandbox is enabled."""
+    """Return whether an explicitly configured sandbox is enabled.
+
+    Returns:
+        False when ``configure_sandbox`` has not been called.
+    """
 
     return bool(_sandbox_settings is not None and _sandbox_settings.enabled)

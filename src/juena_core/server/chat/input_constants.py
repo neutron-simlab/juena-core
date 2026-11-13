@@ -22,10 +22,9 @@ INPUTS_PREFIX = "/inputs/"
 # text the user actually typed has to ride along or a reloaded chat shows the
 # manifest in the user's own bubble.
 #
-# These two strings are **not renamed** for this package. They are stored on
-# real, already-persisted messages in juena-chatbot's checkpointer; renaming
-# them would make every existing thread render its manifest in the user's
-# bubble. The `juena_` prefix is history, not ownership.
+# Do not rename them, despite the `juena_` prefix: they are stored on messages
+# already saved in existing checkpointers, and renaming them would make every
+# existing thread show its manifest in the user's bubble.
 DISPLAY_TEXT_KEY = "juena_display_text"
 DISPLAY_ATTACHMENTS_KEY = "juena_attachments"
 
@@ -33,9 +32,9 @@ UPLOADS_PREFIX = "/inputs/uploads/"
 UPLOADS_MANIFEST_PATH = "/inputs/uploads_manifest.md"
 FENCED_CODE_RE = re.compile(r"```(?P<lang>[A-Za-z0-9_#+.-]*)\n(?P<body>.*?)```", re.DOTALL)
 # MULTILINE so the `^`-anchored alternatives match at the start of any line, not
-# only at the start of the string -- without it, JS/Java stack traces went
-# undetected. The trailing bare `Error:` alternative is deliberately absent: it
-# matched ordinary prose such as "What does the Error: message mean?".
+# only at the start of the string; otherwise JS/Java stack traces are missed.
+# Do not add a bare `Error:` alternative: it matches ordinary prose such as
+# "What does the Error: message mean?".
 ERROR_LINE_RE = re.compile(
     r"(Traceback \(most recent call last\):|^\s*File \".*\", line \d+|^\s*at .+\(.+:\d+\)|"
     r"^\s*Caused by:|^\s*ERROR\b|\b[A-Za-z_][A-Za-z0-9_]*(Error|Exception)\b:)",

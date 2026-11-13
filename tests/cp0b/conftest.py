@@ -1,4 +1,5 @@
-"""Shared fixtures for CP0b's dependency-contract tests.
+"""Shared fixtures for the tests that check installed libraries behave as
+juena_core assumes.
 
 These tests exercise real library behaviour against a throwaway FastMCP server
 (``scratch_server.py``) and, for the checkpointing contract, a real Postgres

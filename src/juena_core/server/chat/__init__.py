@@ -1,5 +1,4 @@
-"""Chat persistence and turn-input handling. See 00-BOUNDARY.md, *Moves
-whole* — all six modules."""
+"""Chat persistence and turn-input handling."""
 
 from __future__ import annotations
 

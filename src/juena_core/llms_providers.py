@@ -49,7 +49,11 @@ def _is_available(provider: str) -> bool:
 
 
 def get_available_providers() -> dict[str, bool]:
-    """Return availability for every provider this build can construct."""
+    """Return availability for every provider this build can construct.
+
+    Returns:
+        Provider name mapped to whether its credentials are configured.
+    """
 
     return {name: _is_available(name) for name in _PROVIDERS}
 
@@ -111,6 +115,13 @@ def same_model(first: Any, second: Any) -> bool:
 
     Settings such as max_tokens or timeout do not make a model different: a
     fallback that only changes them fails the same way as the primary.
+
+    Args:
+        first: One chat model.
+        second: The other chat model.
+
+    Returns:
+        Whether both name the same model at the same base URL.
     """
 
     name = getattr(first, "model_name", None)
@@ -151,7 +162,24 @@ def build_chat_model(
     temperature: float = 0.0,
     **overrides: Any,
 ) -> BaseChatModel:
-    """Create a configured chat model for a supported provider."""
+    """Create a configured chat model for a supported provider.
+
+    Models are cached per configuration, so their HTTP connection pools are
+    reused; overrides that cannot be hashed skip the cache.
+
+    Args:
+        provider: Provider name; ``None`` means ``DEFAULT_PROVIDER``.
+        model: Model name; ``None`` means ``DEFAULT_MODEL``.
+        temperature: Sampling temperature.
+        **overrides: ``max_tokens``, ``timeout``, ``max_retries`` or
+            ``streaming``, replacing the configured value.
+
+    Returns:
+        The chat model.
+
+    Raises:
+        ValueError: The provider is not supported.
+    """
 
     config = settings()
     provider = (provider or config.DEFAULT_PROVIDER).lower()
@@ -171,7 +199,16 @@ def build_chat_model(
 
 
 def get_available_models(provider: str) -> list[str]:
-    """Return models allowed for *provider*, applying its configured filter."""
+    """Return models allowed for *provider*, applying its configured filter.
+
+    Args:
+        provider: Provider name.
+
+    Returns:
+        The provider's models that the filter names, all of them when the
+        filter is empty or names none, or an empty list for an unknown
+        provider.
+    """
 
     config = settings()
     provider = provider.lower()
@@ -206,7 +243,14 @@ def get_available_models(provider: str) -> list[str]:
 
 
 def get_default_model(provider: str) -> str:
-    """Return the embedding application's configured provider default."""
+    """Return the embedding application's configured provider default.
+
+    Args:
+        provider: Provider name.
+
+    Returns:
+        The configured default model, or ``""`` for an unknown provider.
+    """
 
     config = settings()
     provider = provider.lower()
@@ -218,7 +262,15 @@ def get_default_model(provider: str) -> str:
 
 
 def format_model_name(provider: str, model: str) -> str:
-    """Format a provider model identifier for display."""
+    """Format a provider model identifier for display.
+
+    Args:
+        provider: Provider name.
+        model: Model identifier.
+
+    Returns:
+        The display name for a Blablador model, otherwise ``model`` unchanged.
+    """
 
     if provider.lower() == Provider.BLABLADOR.value:
         from juena_core.schema.llm_models import get_blablador_model_display_name

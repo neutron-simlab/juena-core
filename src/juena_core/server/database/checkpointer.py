@@ -18,6 +18,15 @@ _checkpointer: AsyncPostgresSaver | None = None
 
 
 def get_checkpointer() -> AsyncPostgresSaver:
+    """Return the checkpointer opened by :func:`checkpointer_lifespan`.
+
+    Returns:
+        The shared Postgres checkpointer.
+
+    Raises:
+        RuntimeError: The lifespan has not started.
+    """
+
     if _checkpointer is None:
         raise RuntimeError(
             "Checkpointer not initialized. Ensure the FastAPI lifespan has started."
@@ -30,6 +39,9 @@ async def checkpointer_lifespan() -> AsyncGenerator[AsyncPostgresSaver, None]:
     """Migrate and expose the checkpointer over the shared psycopg pool.
 
     Must be entered inside ``database_lifespan``, which owns the pool.
+
+    Yields:
+        The checkpointer, with its tables created.
     """
 
     global _checkpointer

@@ -108,6 +108,19 @@ class PodmanSandboxBackend(BaseSandbox):
         run_id: str | None,
         control: Any = None,
     ) -> None:
+        """Initialize a backend for one conversation's workspace.
+
+        Args:
+            jobs: The job queue that commands are submitted through.
+            workspaces: The store that holds the workspace files.
+            tenant_id: The hashed id of the user who owns the workspace.
+            workspace_id: The hashed id of the conversation's workspace.
+            user_id: The signed-in user, for artifacts and the audit log.
+            thread_id: The conversation, for artifacts and the audit log.
+            run_id: The run that jobs and artifacts are recorded under, if any.
+            control: The run's stop control, or None. Each command runs as one
+                of its operations, and the run is checked once the job ends.
+        """
         self._jobs = jobs
         self._workspaces = workspaces
         self._tenant_id = tenant_id
@@ -119,6 +132,7 @@ class PodmanSandboxBackend(BaseSandbox):
 
     @property
     def id(self) -> str:
+        """The workspace id."""
         return self._workspace_id
 
     @staticmethod
@@ -132,6 +146,21 @@ class PodmanSandboxBackend(BaseSandbox):
             return
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        """Run a command in the sandbox and collect what it wrote to ``/workspace/outputs``.
+
+        A command that only prints a stored output as base64 is not run. An
+        error while running comes back as an ``exit_code`` of None with the
+        reason in the output, so the chat keeps going.
+
+        Args:
+            command: The shell command to run.
+            timeout: Seconds to allow. None, or more than the configured limit,
+                means the configured limit.
+
+        Returns:
+            The output for the model, with a note on which files reached the
+            user, the exit code, and whether the output was cut short.
+        """
         if self._control is not None:
             self._control.sandbox_jobs = self._jobs
         with self._control.operation() if self._control is not None else nullcontext():
@@ -278,6 +307,15 @@ class PodmanSandboxBackend(BaseSandbox):
             return ExecuteResponse(output=f"Sandbox unavailable: {exc}", exit_code=None)
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """Find files matching a glob pattern, searching inside the sandbox.
+
+        Args:
+            pattern: The glob pattern.
+            path: The directory to search. None means ``/workspace``; ``/`` is refused.
+
+        Returns:
+            The matching files, or an error.
+        """
         search_path = path or "/workspace"
         if PurePosixPath(search_path) == PurePosixPath("/"):
             return GlobResult(error="Recursive searches from / are not allowed")
@@ -292,6 +330,16 @@ class PodmanSandboxBackend(BaseSandbox):
         path: str | None = None,
         glob: str | None = None,
     ) -> GrepResult:
+        """Search file contents by running grep inside the sandbox.
+
+        Args:
+            pattern: The pattern to search for.
+            path: The directory to search. None means ``/workspace``; ``/`` is refused.
+            glob: Search only files matching this glob, if given.
+
+        Returns:
+            The matching lines, or an error.
+        """
         search_path = path or "/workspace"
         if PurePosixPath(search_path) == PurePosixPath("/"):
             return GrepResult(error="Recursive searches from / are not allowed")
@@ -311,6 +359,19 @@ class PodmanSandboxBackend(BaseSandbox):
             return self._workspaces.download(self._workspace_id, self._tenant_id, paths)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        """Write files into the workspace.
+
+        Files under ``/workspace/outputs/`` are also registered as artifacts for
+        the user. If that fails, the write still counts as done and the user is
+        told through the undelivered-files note instead.
+
+        Args:
+            files: ``(path, content)`` pairs.
+
+        Returns:
+            One response per file, in order, with an error when the write failed
+            or the workspace was busy.
+        """
         if not files:
             return []
         with self._jobs.workspace_guard(self._workspace_id) as available:
@@ -372,6 +433,15 @@ class PodmanSandboxBackend(BaseSandbox):
         return responses
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Read files from the workspace.
+
+        Args:
+            paths: The files to read.
+
+        Returns:
+            One response per path, in order, with the content or an error such
+            as ``workspace busy``.
+        """
         if not paths:
             return []
         with self._jobs.workspace_guard(self._workspace_id) as available:
@@ -398,16 +468,23 @@ class ReadOnlySandboxInputsBackend(BackendProtocol):
     """Route-local `/inputs` adapter over the sandbox's read-only input mount."""
 
     def __init__(self, sandbox: SandboxBackendProtocol) -> None:
+        """Initialize the adapter.
+
+        Args:
+            sandbox: The sandbox backend whose ``/inputs`` mount is read.
+        """
         self._sandbox = sandbox
 
     @staticmethod
     def _full(path: str | None) -> str:
+        """Map a route-local path to the sandbox's ``/inputs`` path, refusing unsafe ones."""
         local = path or "/"
         assert_safe_path(local, "Invalid /inputs path")
         return "/inputs" if local == "/" else f"/inputs{local}"
 
     @staticmethod
     def _local(path: str) -> str:
+        """Map a sandbox ``/inputs`` path back to a route-local one."""
         if path == "/inputs":
             return "/"
         if path.startswith("/inputs/"):
@@ -415,6 +492,14 @@ class ReadOnlySandboxInputsBackend(BackendProtocol):
         return path
 
     def ls(self, path: str) -> LsResult:
+        """List a directory under ``/inputs``.
+
+        Args:
+            path: The directory, as a path inside ``/inputs``.
+
+        Returns:
+            The entries with route-local paths, or an error.
+        """
         try:
             result = self._sandbox.ls(self._full(path))
         except ValueError as exc:
@@ -426,6 +511,16 @@ class ReadOnlySandboxInputsBackend(BackendProtocol):
         return LsResult(error=result.error, entries=entries)
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        """Read a file under ``/inputs``.
+
+        Args:
+            file_path: The file, as a path inside ``/inputs``.
+            offset: Line to start reading from, counting from 0.
+            limit: Maximum number of lines to read.
+
+        Returns:
+            The file's content, or an error.
+        """
         try:
             return self._sandbox.read(self._full(file_path), offset=offset, limit=limit)
         except ValueError as exc:
@@ -437,6 +532,16 @@ class ReadOnlySandboxInputsBackend(BackendProtocol):
         path: str | None = None,
         glob: str | None = None,
     ) -> GrepResult:
+        """Search file contents under ``/inputs``.
+
+        Args:
+            pattern: The pattern to search for.
+            path: The directory, as a path inside ``/inputs``. None means all of it.
+            glob: Search only files matching this glob, if given.
+
+        Returns:
+            The matches with route-local paths, or an error.
+        """
         try:
             result = self._sandbox.grep(pattern, self._full(path), glob)
         except ValueError as exc:
@@ -448,6 +553,15 @@ class ReadOnlySandboxInputsBackend(BackendProtocol):
         return GrepResult(error=result.error, matches=matches)
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """Find files under ``/inputs`` matching a glob pattern.
+
+        Args:
+            pattern: The glob pattern.
+            path: The directory, as a path inside ``/inputs``. None means all of it.
+
+        Returns:
+            The matching files with route-local paths, or an error.
+        """
         try:
             result = self._sandbox.glob(pattern, self._full(path))
         except ValueError as exc:
@@ -460,6 +574,15 @@ class ReadOnlySandboxInputsBackend(BackendProtocol):
 
     @staticmethod
     def write(file_path: str, content: str) -> WriteResult:
+        """Refuse a write, because staged inputs are read-only.
+
+        Args:
+            file_path: The path the caller asked to write.
+            content: Ignored.
+
+        Returns:
+            An error naming the path.
+        """
         del content
         return WriteResult(error=f"Cannot write to read-only staged input path '{file_path}'.")
 
@@ -470,16 +593,44 @@ class ReadOnlySandboxInputsBackend(BackendProtocol):
         new_string: str,
         replace_all: bool = False,
     ) -> EditResult:
+        """Refuse an edit, because staged inputs are read-only.
+
+        Args:
+            file_path: The path the caller asked to edit.
+            old_string: Ignored.
+            new_string: Ignored.
+            replace_all: Ignored.
+
+        Returns:
+            An error naming the path.
+        """
         del old_string, new_string, replace_all
         return EditResult(error=f"Cannot edit read-only staged input path '{file_path}'.")
 
     @staticmethod
     def upload_files(files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        """Refuse every upload, because staged inputs are read-only.
+
+        Args:
+            files: ``(path, content)`` pairs.
+
+        Returns:
+            A ``permission_denied`` error for each file.
+        """
         return [
             FileUploadResponse(path=path, error="permission_denied") for path, _content in files
         ]
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Read files under ``/inputs``.
+
+        Args:
+            paths: The files, as paths inside ``/inputs``.
+
+        Returns:
+            One response per path. If any path is unsafe, every response
+            carries that error.
+        """
         full_paths: list[str] = []
         for path in paths:
             try:

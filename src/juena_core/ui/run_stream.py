@@ -28,6 +28,21 @@ __all__ = [
 
 @dataclass
 class LiveView:
+    """What the live reply has shown so far, kept across page reruns.
+
+    Attributes:
+        text: The answer text received so far.
+        complete: Whether the complete answer message has arrived.
+        steps: The activity log's steps.
+        artifacts: Files streamed during the turn.
+        started: When the turn started, from ``time.monotonic``.
+        label: The status box's label.
+        interrupt: The question or approval the turn paused on, if any.
+        resume_interrupt: The interrupt this turn resumes, if any, so it can
+            be offered again if the reply fails.
+        last_message: The last complete assistant message.
+    """
+
     text: str = ""
     complete: bool = False
     steps: list = field(default_factory=list)
@@ -40,9 +55,13 @@ class LiveView:
 
 
 class StreamController:
-    """Only plain data crosses the worker boundary; all st calls stay on-page."""
+    """One browser session's background response reader.
+
+    Only plain data crosses the worker boundary; all st calls stay on-page.
+    """
 
     def __init__(self):
+        """Initialize an idle controller."""
         self.lock = threading.Lock()
         self.buffer = deque()
         self.thread: threading.Thread | None = None
@@ -57,24 +76,43 @@ class StreamController:
 
     @property
     def active(self):
+        """Whether a response is being read."""
         with self.lock:
             return not self.done
 
     def push(self, chunk):
+        """Buffer one event, remembering the latest run snapshot.
+
+        Args:
+            chunk: One streamed event.
+        """
         with self.lock:
             if isinstance(chunk, dict) and chunk.get("type") == "run":
                 self.run = chunk
             self.buffer.append(chunk)
 
     def drain(self):
-        """Take available events without blocking the page on the network."""
+        """Take available events without blocking the page on the network.
+
+        Returns:
+            The buffered events, oldest first.
+        """
         with self.lock:
             chunks = list(self.buffer)
             self.buffer.clear()
             return chunks
 
     def start(self, thread_id, chunks, *, interrupt=None):
-        """Consume one async stream; rerenders reuse this same reader."""
+        """Consume one async stream; rerenders reuse this same reader.
+
+        Args:
+            thread_id: The conversation the reply belongs to.
+            chunks: The async stream of events.
+            interrupt: The interrupt being resumed, if any.
+
+        Raises:
+            RuntimeError: A response is already running.
+        """
         if self.active:
             raise RuntimeError("A response is already running")
         self.thread_id = thread_id
@@ -136,10 +174,21 @@ class StreamController:
 
 @st.cache_resource(scope="session", on_release=lambda controller: controller.close())
 def get_stream_controller():
+    """Return this browser session's controller, closed when the session ends.
+
+    Returns:
+        The controller shared by every rerun of this session.
+    """
     return StreamController()
 
 
 def start_response(message, *, attachments=None):
+    """Start reading the reply to a user message, then rerun the page.
+
+    Args:
+        message: The user's message.
+        attachments: Files sent with it, if any.
+    """
     client = st.session_state.client
     controller = get_stream_controller()
     chunks = client.astream(
@@ -154,6 +203,15 @@ def start_response(message, *, attachments=None):
 
 
 def start_resume(interrupt, *, kind, **fields):
+    """Start reading the rest of a paused turn, then rerun the page.
+
+    The activity log the turn paused with is carried over.
+
+    Args:
+        interrupt: The pending interrupt being answered.
+        kind: The interrupt kind the server resumes it as.
+        **fields: The answer's fields for that kind.
+    """
     client = st.session_state.client
     controller = get_stream_controller()
     thread_id = st.session_state.thread_id

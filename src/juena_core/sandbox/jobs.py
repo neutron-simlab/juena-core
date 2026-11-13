@@ -50,7 +50,17 @@ _COLUMNS = (
 
 
 def database_url(url: str) -> str:
-    """Strip the SQLAlchemy driver suffix psycopg does not understand."""
+    """Strip the SQLAlchemy driver suffix psycopg does not understand.
+
+    Args:
+        url: A Postgres URL, with or without ``+psycopg``.
+
+    Returns:
+        The same URL starting with ``postgresql://``.
+
+    Raises:
+        ValueError: The URL is not a Postgres one.
+    """
     for prefix in _DATABASE_URL_PREFIXES:
         if url.startswith(prefix):
             return f"postgresql://{url.removeprefix(prefix)}"
@@ -64,6 +74,27 @@ def _workspace_lock_key(workspace_id: str) -> int:
 
 @dataclass(frozen=True, slots=True)
 class SandboxJobRecord:
+    """One row of the ``sandbox_jobs`` table.
+
+    Attributes:
+        id: The job's id.
+        tenant_id: The hashed id of the user who owns the workspace.
+        workspace_id: The hashed id of the conversation's workspace.
+        command: The shell command.
+        timeout_seconds: The longest the command may run.
+        max_output_bytes: How much of its output is kept.
+        status: ``queued``, ``running``, or one of the terminal statuses.
+        output: The command's output, or the reason it failed.
+        exit_code: The command's exit code, if it has one.
+        truncated: Whether the output was cut at ``max_output_bytes``.
+        artifact_names: The output files accepted for delivery.
+        created_at: When the job was queued.
+        started_at: When a worker slot claimed it.
+        finished_at: When it reached a terminal status.
+        run_id: The run that submitted it, so stopping the run can cancel it.
+        cancel_requested: Whether stopping the run asked to cancel it.
+    """
+
     id: UUID
     tenant_id: str
     workspace_id: str
@@ -84,6 +115,17 @@ class SandboxJobRecord:
 
 @dataclass(frozen=True, slots=True)
 class SandboxExecutionResult:
+    """What a submitted command came back with.
+
+    Attributes:
+        status: A job status, or ``busy`` / ``unavailable`` when no job was created.
+        output: The command's output, or why it did not run.
+        job_id: The job's id, or None when no job was created.
+        exit_code: The command's exit code, if it has one.
+        truncated: Whether the output was cut at the byte limit.
+        artifact_names: The output files accepted for delivery.
+    """
+
     status: str
     output: str
     job_id: UUID | None = None
@@ -126,7 +168,14 @@ def _result(record: SandboxJobRecord) -> SandboxExecutionResult:
 
 @contextmanager
 def hold_worker_lock(url: str) -> Iterator[bool]:
-    """Hold the worker session lock on a dedicated connection."""
+    """Hold the worker session lock on a dedicated connection.
+
+    Args:
+        url: The Postgres URL of the job queue.
+
+    Yields:
+        Whether the lock was acquired. False means another worker holds it.
+    """
 
     with psycopg.connect(database_url(url), autocommit=True) as connection:
         row = connection.execute(
@@ -140,6 +189,12 @@ class SandboxJobs:
     """Every `sandbox_jobs` operation, for both the application and the worker."""
 
     def __init__(self, url: str, *, concurrency: int) -> None:
+        """Initialize the queue. Call ``open`` before using it.
+
+        Args:
+            url: The Postgres URL; a SQLAlchemy driver suffix is accepted.
+            concurrency: How many jobs may be active at once.
+        """
         self.concurrency = concurrency
         self.pool = ConnectionPool(
             conninfo=database_url(url),
@@ -150,13 +205,19 @@ class SandboxJobs:
         )
 
     def open(self) -> None:
+        """Open the connection pool and wait until it is ready."""
         self.pool.open(wait=True)
 
     def close(self) -> None:
+        """Close the connection pool."""
         self.pool.close()
 
     def worker_is_alive(self) -> bool:
-        """Read the worker's session lock. objsubid 2 marks the two-int4 form."""
+        """Read the worker's session lock. objsubid 2 marks the two-int4 form.
+
+        Returns:
+            True while a worker holds the lock.
+        """
 
         with self.pool.connection() as connection:
             row = connection.execute(
@@ -176,7 +237,19 @@ class SandboxJobs:
         max_output_bytes: int,
         run_id: str | None = None,
     ) -> SandboxJobRecord | None:
-        """Admit a job without racing capacity or workspace file operations."""
+        """Admit a job without racing capacity or workspace file operations.
+
+        Args:
+            tenant_id: The hashed id of the user who owns the workspace.
+            workspace_id: The hashed id of the conversation's workspace.
+            command: The shell command.
+            timeout_seconds: The longest the command may run.
+            max_output_bytes: How much of its output to keep.
+            run_id: The run submitting it, if any, so stopping the run can cancel it.
+
+        Returns:
+            The queued job, or None when capacity or the workspace is busy.
+        """
 
         with self.pool.connection() as connection, connection.transaction():
             connection.execute("SELECT pg_advisory_xact_lock(%s)", (_ADMISSION_LOCK,))
@@ -228,7 +301,21 @@ class SandboxJobs:
         status_callback: Callable[[str], None] | None = None,
         run_id: str | None = None,
     ) -> SandboxExecutionResult:
-        """Submit one command and wait for its terminal row."""
+        """Submit one command and wait for its terminal row.
+
+        Args:
+            tenant_id: The hashed id of the user who owns the workspace.
+            workspace_id: The hashed id of the conversation's workspace.
+            command: The shell command.
+            timeout_seconds: The longest the command may run.
+            max_output_bytes: How much of its output to keep.
+            status_callback: Called with each new status, starting with ``queued``.
+            run_id: The run submitting it, if any, so stopping the run can cancel it.
+
+        Returns:
+            The finished job's result, ``unavailable`` when no worker is
+            running, or ``busy`` when the job was not admitted.
+        """
 
         if not self.worker_is_alive():
             return SandboxExecutionResult("unavailable", "Sandbox worker is unavailable")
@@ -271,7 +358,14 @@ class SandboxJobs:
 
     @contextmanager
     def workspace_guard(self, workspace_id: str) -> Iterator[bool]:
-        """Yield False instead of blocking behind an active workspace job."""
+        """Yield False instead of blocking behind an active workspace job.
+
+        Args:
+            workspace_id: The workspace to lock.
+
+        Yields:
+            True when the workspace is free. It stays locked until the block exits.
+        """
 
         with self.pool.connection() as connection, connection.transaction():
             locked = connection.execute(
@@ -286,7 +380,11 @@ class SandboxJobs:
             yield bool(locked and locked["locked"] and active is None)
 
     def claim(self) -> SandboxJobRecord | None:
-        """Take the oldest queued job. SKIP LOCKED keeps slots from colliding."""
+        """Take the oldest queued job. SKIP LOCKED keeps slots from colliding.
+
+        Returns:
+            The claimed job, now running, or None when nothing claimable is queued.
+        """
 
         now = datetime.now(UTC)
         with self.pool.connection() as connection:
@@ -306,6 +404,14 @@ class SandboxJobs:
         return _record(row) if row is not None else None
 
     def get(self, job_id: UUID) -> SandboxJobRecord | None:
+        """Return one job.
+
+        Args:
+            job_id: The job's id.
+
+        Returns:
+            The job, or None when it does not exist.
+        """
         with self.pool.connection() as connection:
             row = connection.execute(
                 f"SELECT {_COLUMNS} FROM sandbox_jobs WHERE id = %s",
@@ -323,6 +429,25 @@ class SandboxJobs:
         truncated: bool = False,
         artifact_names: list[str] | None = None,
     ) -> SandboxJobRecord | None:
+        """Record a job's terminal status and result.
+
+        A job that a stop asked to cancel is stored as ``cancelled`` with no
+        files. A job that has already finished is left as it is.
+
+        Args:
+            job_id: The job's id.
+            status: The terminal status.
+            output: The command's output, or the reason it failed.
+            exit_code: The command's exit code, if it has one.
+            truncated: Whether the output was cut at the byte limit.
+            artifact_names: The output files accepted for delivery.
+
+        Returns:
+            The job as stored afterwards, or None when it does not exist.
+
+        Raises:
+            ValueError: ``status`` is not a terminal status.
+        """
         if status not in TERMINAL_STATUSES:
             raise ValueError(f"Sandbox job status is not terminal: {status}")
         with self.pool.connection() as connection:
@@ -350,7 +475,16 @@ class SandboxJobs:
         return _record(row) if row is not None else self.get(job_id)
 
     def cancel_run(self, run_id: str) -> int:
-        """Cancel queued jobs; running slots retain ownership until cleanup."""
+        """Cancel queued jobs; running slots retain ownership until cleanup.
+
+        Running jobs are only marked, and their worker slot stops them.
+
+        Args:
+            run_id: The run whose jobs to cancel.
+
+        Returns:
+            How many of the run's jobs are still running.
+        """
         with self.pool.connection() as connection, connection.transaction():
             connection.execute(
                 "UPDATE sandbox_jobs SET cancel_requested = true, "
@@ -366,7 +500,14 @@ class SandboxJobs:
             return row["count"]
 
     def fail_active(self, output: str) -> int:
-        """Fail every row left by a previous worker process."""
+        """Fail every row left by a previous worker process.
+
+        Args:
+            output: The reason stored on each row.
+
+        Returns:
+            How many rows were failed.
+        """
 
         with self.pool.connection() as connection:
             return connection.execute(
@@ -376,6 +517,11 @@ class SandboxJobs:
             ).rowcount
 
     def fail_stale_queued(self) -> int:
+        """Fail queued jobs that no worker claimed within the claim deadline.
+
+        Returns:
+            How many jobs were failed.
+        """
         now = datetime.now(UTC)
         with self.pool.connection() as connection:
             return connection.execute(
@@ -386,6 +532,15 @@ class SandboxJobs:
             ).rowcount
 
     def fail_queued(self, job_id: UUID, output: str) -> SandboxJobRecord | None:
+        """Fail one job if it is still queued.
+
+        Args:
+            job_id: The job's id.
+            output: The reason stored on the row.
+
+        Returns:
+            The failed job, or None when it was not queued.
+        """
         with self.pool.connection() as connection:
             row = connection.execute(
                 f"""
@@ -398,6 +553,11 @@ class SandboxJobs:
         return _record(row) if row is not None else None
 
     def active_workspaces(self) -> set[str]:
+        """Return the workspaces that have a queued or running job.
+
+        Returns:
+            Their workspace ids.
+        """
         with self.pool.connection() as connection:
             rows = connection.execute(
                 "SELECT DISTINCT workspace_id FROM sandbox_jobs WHERE status = ANY(%s)",
@@ -406,6 +566,14 @@ class SandboxJobs:
         return {row["workspace_id"] for row in rows}
 
     def cleanup(self, *, older_than: datetime) -> int:
+        """Delete finished jobs.
+
+        Args:
+            older_than: Delete jobs that finished before this time.
+
+        Returns:
+            How many rows were deleted.
+        """
         with self.pool.connection() as connection:
             return connection.execute(
                 "DELETE FROM sandbox_jobs WHERE status = ANY(%s) AND finished_at < %s",

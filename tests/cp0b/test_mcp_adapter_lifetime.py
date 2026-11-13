@@ -1,9 +1,8 @@
-"""CP0b, row 2: a discovered tool must still succeed after the
-``async with MCPAdapter(...)`` discovery block has exited. This is the
-contract that inverted when ``langchain-mcp-adapters`` (whose client raised on
-``__aenter__``) was replaced by ``langchain.mcp`` (whose adapter *is* an async
-context manager). If this regresses, CP5's "discovered tools are stateless
-after discovery" note is wrong and must be revised before it is relied on.
+"""A discovered tool still succeeds after the ``async with MCPAdapter(...)``
+discovery block has exited.
+
+``juena_core.mcp`` hands back the discovered tools and keeps no adapter alive,
+so it relies on each tool being usable on its own after discovery.
 """
 
 import pytest

@@ -1,13 +1,4 @@
-"""Tests for equation-markup detection and normalization helpers.
-
-Moved here from juena-chatbot in plan 02/step 3. It replaces the five
-"representative contracts" plan 01 wrote as a placeholder: every one of those
-is covered here at finer grain -- aliases by the inline and block cases, code
-skipping by ``..._skips_inline_code_and_fenced_code``, the bare equation by
-``..._wraps_bare_equation_line``, the prose reference by the two
-``command_reference`` tests, and the trailing fragment by
-``..._wraps_trailing_equation_fragment_after_math_block``.
-"""
+"""Tests for equation-markup detection and normalization helpers."""
 
 import juena_core.ui.math_rendering as math_rendering
 
@@ -108,8 +99,8 @@ def test_normalize_math_markdown_wraps_trailing_equation_fragment_after_math_blo
 
 
 def test_normalize_math_markdown_keeps_dollars_out_of_bracket_display_block() -> None:
-    # The answer that rendered as red LaTeX source: a correct \[ ... \] block
-    # whose second line starts with \sigma used to come back wrapped in $...$.
+    # A correct \[ ... \] block whose second line starts with \sigma must not
+    # come back wrapped in $...$, which renders as red LaTeX source.
     content = (
         "The inverse-variance weighted (IVW) mean\n"
         "\\[\n"

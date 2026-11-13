@@ -27,6 +27,13 @@ def render_filesystem(*, api_url: str, thread_id: str, session_scope: str,
 
     Only view bookkeeping and explicit composer handoffs cross the Python bridge.
     Its fragment reruns queue safely while the foreground stream is being consumed.
+
+    Args:
+        api_url: The API's address as the browser reaches it.
+        thread_id: The conversation whose files are shown.
+        session_scope: Names the signed-in browser session; a new value forgets
+            the saved views.
+        refresh_generation: Increase it to make the panel reload its listing.
     """
     if not (_ASSETS / "filesystem.js").is_file():
         st.error("Build juena-core's explorer: cd frontend/filesystem && npm ci && npm run build")

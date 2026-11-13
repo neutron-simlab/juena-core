@@ -1,10 +1,4 @@
-"""Contracts for the reusable Streamlit shell extracted in CP5.
-
-Two of these were replaced in plan 02/step 3 by the finer-grained suite that
-moved here from juena-chatbot as ``test_ui_components.py``:
-``test_sanitize_assistant_content_removes_unrenderable_local_images`` and
-``test_artifact_history_fetch_uses_the_session_client``. That file names both.
-"""
+"""Contracts for the reusable Streamlit shell."""
 
 from __future__ import annotations
 
@@ -113,10 +107,8 @@ def test_chat_storage_preserves_and_filters_agent_identity() -> None:
 def test_chat_storage_never_shares_clients_between_browser_sessions() -> None:
     """Streamlit module globals are shared; a session token must not be.
 
-    Moved here from juena-chatbot in plan 02/step 3, and it replaces the
-    ``Mock(spec=BaseAgentClient)`` version written in plan 01: real clients
-    carry real session tokens, so this also shows each adapter holding *its
-    own* caller's token rather than only holding a distinct object.
+    Real clients carry real session tokens, so this shows each adapter holding
+    its own caller's token, not only a distinct object.
     """
 
     alice = BaseAgentClient(session_token="alice-session")

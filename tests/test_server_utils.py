@@ -47,7 +47,7 @@ def test_reasoning_blocks_are_surfaced_not_dropped_into_content() -> None:
 
 
 def test_untyped_content_blocks_do_not_raise() -> None:
-    """The old hand-rolled flattener indexed content_item["type"] unguarded."""
+    """A content block with no "type" key is skipped rather than raising KeyError."""
     message = AIMessage(content=[{"text": "no type key"}, {"type": "text", "text": "ok"}])
 
     assert langchain_to_chat_message(message).content == "ok"
@@ -61,7 +61,7 @@ def test_custom_message_accepts_dict_and_rejects_str() -> None:
     assert converted.type == "custom"
     assert converted.custom_data == payload
 
-    # A str payload used to be indexed as content[0], yielding a single char.
+    # Indexing a str payload as content[0] would yield a single char.
     with pytest.raises(ValueError, match="must be a dict"):
         langchain_to_chat_message(LangchainChatMessage(role="custom", content="oops"))
 
@@ -69,8 +69,8 @@ def test_custom_message_accepts_dict_and_rejects_str() -> None:
 def test_staged_human_message_replays_as_the_users_own_text() -> None:
     """A turn with uploads sends the `/inputs` manifest to the model, but the
     checkpointer is the only store of message content -- so without the
-    preserved original, reloading the chat showed agent scaffolding inside the
-    user's own bubble."""
+    preserved original, reloading the chat would show agent scaffolding inside
+    the user's own bubble."""
     typed = "Why does my reduction script crash on the second run?"
     manifest = (
         "Persistent uploaded files for this chat are available under `/inputs/uploads/`.\n"

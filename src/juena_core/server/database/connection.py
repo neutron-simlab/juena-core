@@ -45,19 +45,48 @@ def _strip_dsn_scheme(database_url: str) -> str:
 
 
 def psycopg_database_url(database_url: str) -> str:
-    """Return the DSN psycopg accepts, for the checkpointer and the Store."""
+    """Return the DSN psycopg accepts, for the checkpointer and the Store.
+
+    Args:
+        database_url: A Postgres connection URL (DSN) starting with
+            ``postgres://``, ``postgresql://`` or ``postgresql+psycopg://``.
+
+    Returns:
+        The same URL with the ``postgresql://`` scheme.
+
+    Raises:
+        ValueError: The URL does not use a Postgres scheme.
+    """
 
     return f"postgresql://{_strip_dsn_scheme(database_url)}"
 
 
 def sqlalchemy_database_url(database_url: str) -> str:
-    """Convert a standard Postgres DSN to SQLAlchemy's async psycopg DSN."""
+    """Convert a standard Postgres DSN to SQLAlchemy's async psycopg DSN.
+
+    Args:
+        database_url: A Postgres connection URL (DSN) starting with
+            ``postgres://``, ``postgresql://`` or ``postgresql+psycopg://``.
+
+    Returns:
+        The same URL with the ``postgresql+psycopg://`` scheme.
+
+    Raises:
+        ValueError: The URL does not use a Postgres scheme.
+    """
 
     return f"postgresql+psycopg://{_strip_dsn_scheme(database_url)}"
 
 
 def get_pool() -> AsyncConnectionPool:
-    """Return the shared psycopg pool used by the checkpointer and the Store."""
+    """Return the shared psycopg pool used by the checkpointer and the Store.
+
+    Returns:
+        The pool opened by :func:`database_lifespan`.
+
+    Raises:
+        RuntimeError: The lifespan has not started.
+    """
 
     if _pool is None:
         raise RuntimeError("Database not initialized. Ensure the FastAPI lifespan has started.")
@@ -65,13 +94,26 @@ def get_pool() -> AsyncConnectionPool:
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    """Return the SQLAlchemy session factory for the application tables.
+
+    Returns:
+        The factory created by :func:`database_lifespan`.
+
+    Raises:
+        RuntimeError: The lifespan has not started.
+    """
+
     if _session_factory is None:
         raise RuntimeError("Database not initialized. Ensure the FastAPI lifespan has started.")
     return _session_factory
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency that supplies one transactional database session."""
+    """FastAPI dependency that supplies one transactional database session.
+
+    Yields:
+        One session, rolled back if the request raises.
+    """
 
     factory = get_session_factory()
     async with factory() as session:
@@ -86,13 +128,19 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 async def database_lifespan() -> AsyncGenerator[AsyncEngine, None]:
     """Open the application database pools and verify connectivity.
 
-    Two pools, not three: SQLAlchemy for the application tables, and one
-    psycopg pool shared by the LangGraph checkpointer and Store. Both are
+    Two pools: SQLAlchemy for the application tables, and one psycopg pool
+    shared by the LangGraph checkpointer and Store. Both are
     derived from the same normalized ``DATABASE_URL``.
 
     ``create_all`` builds every table currently attached to ``Base.metadata``,
     so an application model that no module has imported by this point is
     silently absent and fails at its first write instead of here.
+
+    Yields:
+        The SQLAlchemy engine.
+
+    Raises:
+        RuntimeError: ``DATABASE_URL`` is not set.
     """
 
     global _engine, _session_factory, _pool

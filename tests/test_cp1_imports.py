@@ -1,4 +1,4 @@
-"""The CP1 import gate must hold without application configuration."""
+"""Core's logging, schema and provider modules import with an empty environment."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""CP4 contracts that hold without a database.
+"""Server contracts that hold without a database.
 
 The application surface core promises: which routes exist, which tables it
 owns, what it refuses to serve, and how the pieces behind the routes behave.
@@ -68,8 +68,8 @@ def route_paths(app: Any) -> set[str]:
 
     Read from the OpenAPI schema rather than by walking ``app.routes``: since
     FastAPI 0.141 an included router is one opaque ``_IncludedRouter`` entry
-    there, so the plan's ``sorted(r.path for r in app.routes)`` sees only
-    ``/health``. The schema is the public surface and flattens inclusion.
+    there, so ``sorted(r.path for r in app.routes)`` sees only ``/health``.
+    The schema is the public surface and flattens inclusion.
     """
 
     return set(app.openapi()["paths"])
@@ -122,7 +122,7 @@ def test_the_resume_body_defaults_to_the_clarification_arm_alone(local) -> None:
 
 def test_an_application_supplies_its_own_resume_union(local) -> None:
     """The union is a parameter because its arms are the application's: core
-    cannot name an approval whose model lives in juena-chatbot."""
+    cannot name an approval whose model lives in an application."""
 
     from typing import Annotated, Literal
 
@@ -144,14 +144,12 @@ def test_an_application_supplies_its_own_resume_union(local) -> None:
 def test_extra_lifespans_unwind_before_the_agents_they_may_be_using(configured, monkeypatch) -> None:
     """An application's own shutdown runs first; `shutdown_agents` runs last.
 
-    Found during the plan-02 cutover. juena-chatbot ran, in this order,
-    `research_runner.shutdown()` — which waits for specialists running detached
-    from any request — and only then closed its agents. Entering the extra
-    lifespans inside the `try` whose `finally` closed the agents inverted that:
-    the clients would be pulled out from under work still finishing.
+    An application's shutdown may still be using an agent, for example while it
+    waits for specialists running detached from any request. Closing the agents
+    first would pull their clients out from under work still finishing.
 
-    The database lifespan is still open around both, so the original constraint
-    — close agents before the pools they may be using — continues to hold.
+    The database lifespan stays open around both, so agents still close before
+    the pools they may be using.
     """
 
     import contextlib
@@ -593,11 +591,6 @@ async def test_workspace_view_matches_the_files_sent_to_the_graph() -> None:
 
 # --------------------------------------------------------------------------
 # Thread deletion
-#
-# Moved here from juena-chatbot's ``test_api_endpoints_files.py`` in plan
-# 02/step 3. That module's other test, the chat-recency assertion, is already
-# covered against a real database by
-# ``test_server_routes_postgres.py::test_authorizing_a_message_touches_chat_recency``.
 # --------------------------------------------------------------------------
 
 
@@ -886,3 +879,169 @@ def test_browser_cors_allows_only_configured_credentialed_origin(local):
     response = client.options("/threads/test/filesystem/file", headers={**headers, "Origin": "https://evil.example"})
     assert response.status_code == 400
     assert "access-control-allow-origin" not in response.headers
+
+
+# --------------------------------------------------------------------------
+# The browser-origin guard
+#
+# A browser attaches the session cookie to any request aimed at this server,
+# including one a *different* website asked it to send. Browsers treat every
+# host under one parent domain as the same "site", so the cookie's SameSite
+# rule does not stop a page on a neighbouring intranet host. What does is the
+# ``Origin`` header: the browser states which page sent the request, and the
+# server refuses a request that changes something unless that page is its own.
+# --------------------------------------------------------------------------
+
+OUR_ORIGIN = "https://juena.example"
+
+
+def _guarded_client(principal, **create_app_arguments: Any):
+    """A real ``create_app`` plus two application routes that need no database."""
+
+    from fastapi import APIRouter
+    from fastapi.testclient import TestClient
+
+    extra = APIRouter(prefix="/auth")
+
+    @extra.post("/logout")
+    async def logout() -> dict:
+        return {"reached": "logout"}
+
+    @extra.post("/acs")
+    async def assertion_consumer_service() -> dict:
+        return {"reached": "acs"}
+
+    return TestClient(create_app(
+        principal=principal, browser_origins=(OUR_ORIGIN,), extra_routers=(extra,),
+        **create_app_arguments,
+    ))
+
+
+def _is_origin_refusal(response) -> bool:
+    return response.status_code == 403 and response.json()["detail"]["code"] == "origin_not_allowed"
+
+
+@pytest.mark.parametrize("origin", [
+    "https://other.example",            # a neighbouring website
+    "http://juena.example",             # our host name, but not over HTTPS
+    "https://juena.example.evil.test",  # only starts like ours
+    "null",                             # a sandboxed frame hides where it is from
+])
+def test_a_foreign_page_cannot_post_to_the_application(local, origin) -> None:
+    response = _guarded_client(local).post("/auth/logout", headers={"Origin": origin})
+
+    assert _is_origin_refusal(response)
+
+
+def test_a_foreign_page_cannot_start_a_run_with_a_form_upload(local) -> None:
+    """The route a plain HTML form can reach: multipart needs no browser pre-check."""
+
+    response = _guarded_client(local).post(
+        "/stream_with_files",
+        data={"message": "do something on this user's account"},
+        files={"attachments": ("notes.txt", b"hello", "text/plain")},
+        headers={"Origin": "https://other.example", "Sec-Fetch-Site": "same-site"},
+    )
+
+    assert _is_origin_refusal(response)
+
+
+def test_a_browser_request_that_hides_its_origin_is_refused(local) -> None:
+    """Only a browser sends ``Sec-Fetch-Site``, and a browser always knows its origin."""
+
+    response = _guarded_client(local).post("/auth/logout", headers={"Sec-Fetch-Site": "cross-site"})
+
+    assert _is_origin_refusal(response)
+
+
+def test_our_own_page_and_server_side_clients_still_post(local) -> None:
+    client = _guarded_client(local)
+
+    from_our_page = client.post("/auth/logout", headers={"Origin": OUR_ORIGIN})
+    # The Streamlit server calls the API with httpx, which sends neither header.
+    from_python = client.post("/auth/logout")
+
+    assert from_our_page.json() == {"reached": "logout"}
+    assert from_python.json() == {"reached": "logout"}
+
+
+def test_reading_is_never_refused_by_origin(local) -> None:
+    response = _guarded_client(local).get("/health", headers={"Origin": "https://other.example"})
+
+    assert response.status_code == 200
+
+
+def test_an_exempt_path_accepts_a_foreign_origin(local) -> None:
+    """An identity provider posts the sign-in result from its own website."""
+
+    headers = {"Origin": "https://idp.example"}
+
+    refused = _guarded_client(local).post("/auth/acs", headers=headers)
+    exempted = _guarded_client(local, origin_exempt_paths=("/auth/acs",))
+
+    assert _is_origin_refusal(refused)
+    assert exempted.post("/auth/acs", headers=headers).json() == {"reached": "acs"}
+    assert _is_origin_refusal(exempted.post("/auth/logout", headers=headers))
+
+
+@pytest.mark.parametrize("content_type", [None, "text/plain"])
+def test_a_json_route_refuses_a_body_that_is_not_declared_as_json(local, content_type) -> None:
+    """Why the JSON routes were never reachable from a foreign page.
+
+    A browser lets any page send a body with no content type, or as plain text,
+    without asking the server first. Declaring it as JSON makes the browser ask,
+    and the answer is no. That only helps while the server refuses to read an
+    undeclared body as JSON, which is a FastAPI default this test pins.
+    """
+
+    from fastapi.testclient import TestClient
+
+    from juena_core.server.database.connection import get_db_session
+
+    app = create_app(principal=local)
+    app.dependency_overrides[get_db_session] = lambda: SimpleNamespace()
+    headers = {"Content-Type": content_type} if content_type else {}
+
+    response = TestClient(app).post("/stream", content=b'{"message": "hello"}', headers=headers)
+
+    assert response.status_code == 422
+
+
+def test_a_new_conversation_cannot_take_a_reserved_thread_id(local) -> None:
+    """A client names its own thread, and the checkpointer keys state by that name.
+
+    Applications also checkpoint work no user owns under prefixed names, such
+    as ``research:<job id>`` for background research. Without
+    this refusal a caller who knew such a name could register it as their own
+    conversation and read the state stored under it.
+    """
+
+    from fastapi.testclient import TestClient
+
+    from juena_core.server.database.connection import get_db_session
+
+    class _EmptyDatabase:
+        added: list[Any] = []
+
+        async def get(self, model: Any, key: Any) -> None:
+            return None
+
+        def add(self, row: Any) -> None:
+            self.added.append(row)
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    database = _EmptyDatabase()
+    app = create_app(principal=local)
+    app.dependency_overrides[get_db_session] = lambda: database
+
+    response = TestClient(app).post(
+        "/chats", json={"agent_id": "test", "thread_id": "research:7b0e7c6e-0d5c-4d0a-9a43-1f2f6f1d2c11"}
+    )
+
+    assert response.status_code == 404
+    assert database.added == []

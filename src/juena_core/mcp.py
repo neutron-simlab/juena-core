@@ -1,22 +1,18 @@
 """The MCP connection layer, behind the ``[mcp]`` extra.
 
-New in core — there is no ``juena/mcp.py`` to port; the shape comes from
-``juena/tools/context7.py``, which ran the retired ``langchain-mcp-adapters``.
-**This is the only module in either application stack that imports
-``langchain.mcp``** (01-EXTRACT-JUENA-CORE.md, CP5). The namespace is beta, so
-containing every import here makes a breaking release one module to fix rather
-than a search across two applications.
+MCP (Model Context Protocol) lets an agent use tools served by another
+process. Import ``langchain.mcp`` only in this module: the namespace is beta,
+so keeping every import here makes a breaking release one module to fix.
 
-The library contract below was measured in 01/CP0b (``tests/cp0b/``) against
-the installed release, not assumed:
+How the installed library behaves, checked rather than assumed:
 
 - ``MCPAdapter`` is an async context manager, and ``list_tools()`` returns
-  tools that **stay callable after the discovery block exits** — each reopens
-  its own connection per call. That is also why a tool survives an MCP server
-  restart with no agent rebuild (``test_mcp_reconnection.py``).
-- The config shape is ``{"mcpServers": {...}}`` — FastMCP's ``MCPConfig`` —
-  and the transport is inferred from each entry. There is no ``transport``
-  key any more. One server may be passed as a bare URL string.
+  tools that stay callable after the discovery block exits: each opens its
+  own connection per call. So a tool survives an MCP server restart with no
+  agent rebuild.
+- The config shape is ``{"mcpServers": {...}}`` (FastMCP's ``MCPConfig``),
+  and the transport is inferred from each entry; there is no ``transport``
+  key. One server may be passed as a bare URL string.
 - Discovery is ``await adapter.list_tools()``, not ``get_tools()``.
 
 Because discovered tools are self-contained, this module hands back tools and
@@ -25,19 +21,16 @@ nothing else: there is no adapter to keep alive, and
 to perform. Calling ``__aexit__`` outside the block that entered it would be
 wrong in any case.
 
-**The two functions differ by policy, not by library behaviour**, and the
-difference is a decision rather than an inconsistency:
+The two discovery functions differ only in what they do on failure:
 
 :func:`discover_optional_tools`
-    For an integration nobody's product depends on. If the server is
+    For an integration the application can run without. If the server is
     unreachable its tools should not exist, rather than exist and fail on
-    first use, so this returns ``None`` and logs. juena-chatbot's Context7 is
-    this case.
+    first use, so this logs and returns ``None``.
 
 :func:`discover_tools`
-    For an integration that *is* the product. VITESS execution has nothing to
-    degrade to, so a failure raises and 03/CP3 makes the service healthy
-    before it builds the agent at all.
+    For an integration the application cannot work without. There is
+    nothing to fall back to, so a failure raises.
 """
 
 from __future__ import annotations
@@ -54,7 +47,11 @@ logger = get_logger(__name__)
 
 
 class MCPUnavailableError(RuntimeError):
-    """An MCP server whose tools are required could not be reached."""
+    """An MCP server whose tools are required could not be reached.
+
+    ``status_code`` holds the HTTP status of the failed request, when there
+    was one.
+    """
 
     def __init__(self, message: str, *, status_code: int | None = None):
         super().__init__(message)
@@ -65,6 +62,18 @@ async def call_personal_tool(target: Any, name: str, arguments: dict[str, Any]) 
     """Use a request-owned MCP connection without retaining its auth configuration.
 
     Do not interpolate upstream errors: they may contain authentication headers.
+
+    Args:
+        target: Anything ``MCPAdapter`` accepts, including the request's
+            credentials.
+        name: Tool name, matched exactly or as the ending ``_<name>``.
+        arguments: Arguments for the tool call.
+
+    Returns:
+        The tool's structured content, or its content blocks as dicts.
+
+    Raises:
+        MCPUnavailableError: Any failure, with a fixed message.
     """
     try:
         async with _load_adapter_class()(target) as adapter:
@@ -101,6 +110,9 @@ async def discover_tools(target: Any, *, label: str = "MCP") -> list[BaseTool]:
             ``{"mcpServers": {...}}`` config, or a ``FastMCP`` instance.
         label: Name used in errors and logs, e.g. ``"VITESS"``.
 
+    Returns:
+        The discovered tools.
+
     Raises:
         MCPUnavailableError: the extra is not installed, or discovery failed.
     """
@@ -128,6 +140,13 @@ async def discover_optional_tools(target: Any, *, label: str) -> list[BaseTool] 
     Never raises. An optional integration that is down should leave the agent
     with one capability fewer, not with a tool that fails the first time a
     model reaches for it.
+
+    Args:
+        target: Anything ``MCPAdapter`` accepts, as for :func:`discover_tools`.
+        label: Name used in the warning and logs.
+
+    Returns:
+        The discovered tools, or ``None`` when discovery failed.
     """
 
     try:

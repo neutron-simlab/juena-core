@@ -1,5 +1,5 @@
-"""A throwaway FastMCP server used only to validate langchain.mcp's contracts
-in CP0b. Not part of juena_core's public surface — nothing here ships.
+"""A throwaway FastMCP server for the tests that check ``langchain.mcp``'s
+behaviour. Not part of juena_core's public surface: nothing here ships.
 """
 
 from pydantic import BaseModel
